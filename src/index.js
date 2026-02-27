@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const { createProvider } = require('./providers');
-const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearSession, setProjectDir, getProjectDir, clearProjectDir, setChatModel, getChatModel, clearChatModel, acquireGroupLock, releaseGroupLock, getGroupSharedData, setGroupSharedData, deleteGroupSharedData, claimGroupMessage, getTokenUsage, resetTokenUsage } = require('./claude');
+const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearSession, setProjectDir, getProjectDir, clearProjectDir, setChatModel, getChatModel, clearChatModel, getTokenUsage, resetTokenUsage } = require('./claude');
 const { ensureProfile, getProfile, registerUser, getAllProfiles, formatProfileCard } = require('./profiles');
 const apiCommands = require('./api-commands');
 const drive = require('./drive');
@@ -21,15 +21,12 @@ if (!config.openAccess) {
   }
 }
 
-// Create the provider (webjs or cloud-api, based on WHATSAPP_PROVIDER env)
+// Create the Cloud API provider
 const provider = createProvider();
 
 // Track in-flight requests and queue pending ones per chat
 const processing = new Set();
 const messageQueue = new Map(); // chatId -> [{ msg, chatId, prompt, mediaPath }]
-
-// Flag to suppress bot's own replies from being re-processed (webjs only)
-let botReplying = false;
 
 // Track message IDs sent by the bot (scheduler/send API) to avoid re-processing them
 const botSentMessageIds = new Set();
@@ -46,83 +43,38 @@ const quickReplies = new Map();
 const pendingProjectPolls = new Map();
 const pendingFilePolls = new Map(); // chatId -> { files: [{ name, fullPath }] }
 
-// --- Poll state helpers: routes to shared state for groups, local Map for DMs ---
-function getPendingPoll(chatId) {
-  return chatId.endsWith('@g.us') ? getGroupSharedData(chatId, 'pendingPolls') : pendingPolls.get(chatId) || null;
-}
-function setPendingPoll(chatId, data) {
-  if (chatId.endsWith('@g.us')) setGroupSharedData(chatId, 'pendingPolls', data);
-  else pendingPolls.set(chatId, data);
-}
-function clearPendingPoll(chatId) {
-  if (chatId.endsWith('@g.us')) deleteGroupSharedData(chatId, 'pendingPolls');
-  else pendingPolls.delete(chatId);
-}
+// --- Poll state helpers (local Maps) ---
+function getPendingPoll(chatId) { return pendingPolls.get(chatId) || null; }
+function setPendingPoll(chatId, data) { pendingPolls.set(chatId, data); }
+function clearPendingPoll(chatId) { pendingPolls.delete(chatId); }
 
-function getQuickReplies(chatId) {
-  return chatId.endsWith('@g.us') ? getGroupSharedData(chatId, 'quickReplies') : quickReplies.get(chatId) || null;
-}
-function setQuickReplies(chatId, data) {
-  if (chatId.endsWith('@g.us')) setGroupSharedData(chatId, 'quickReplies', data);
-  else quickReplies.set(chatId, data);
-}
-function clearQuickReplies(chatId) {
-  if (chatId.endsWith('@g.us')) deleteGroupSharedData(chatId, 'quickReplies');
-  else quickReplies.delete(chatId);
-}
+function getQuickReplies(chatId) { return quickReplies.get(chatId) || null; }
+function setQuickReplies(chatId, data) { quickReplies.set(chatId, data); }
+function clearQuickReplies(chatId) { quickReplies.delete(chatId); }
 
-function getPendingProjectPoll(chatId) {
-  return chatId.endsWith('@g.us') ? getGroupSharedData(chatId, 'pendingProjectPolls') : pendingProjectPolls.get(chatId) || null;
-}
-function setPendingProjectPoll(chatId, data) {
-  if (chatId.endsWith('@g.us')) setGroupSharedData(chatId, 'pendingProjectPolls', data);
-  else pendingProjectPolls.set(chatId, data);
-}
-function clearPendingProjectPoll(chatId) {
-  if (chatId.endsWith('@g.us')) deleteGroupSharedData(chatId, 'pendingProjectPolls');
-  else pendingProjectPolls.delete(chatId);
-}
+function getPendingProjectPoll(chatId) { return pendingProjectPolls.get(chatId) || null; }
+function setPendingProjectPoll(chatId, data) { pendingProjectPolls.set(chatId, data); }
+function clearPendingProjectPoll(chatId) { pendingProjectPolls.delete(chatId); }
 
 // --- Provider-agnostic send helpers ---
-// These wrap provider calls and manage the botReplying flag to prevent re-processing
 
 async function botReply(msg, text) {
-  botReplying = true;
-  try {
-    await provider.replyToMessage(msg, text);
-  } finally {
-    botReplying = false;
-  }
+  await provider.replyToMessage(msg, text);
 }
 
 async function botSendChunks(msg, text) {
   const chunks = chunkMessage(text, config.maxChunkSize);
-  botReplying = true;
-  try {
-    for (const chunk of chunks) {
-      await provider.replyToMessage(msg, chunk);
-    }
-  } finally {
-    botReplying = false;
+  for (const chunk of chunks) {
+    await provider.replyToMessage(msg, chunk);
   }
 }
 
 async function botSendPoll(chatId, question, options) {
-  botReplying = true;
-  try {
-    await provider.sendPoll(chatId, question, options);
-  } finally {
-    botReplying = false;
-  }
+  await provider.sendPoll(chatId, question, options);
 }
 
 async function botSendMessage(chatId, text) {
-  botReplying = true;
-  try {
-    await provider.sendMessage(chatId, text);
-  } finally {
-    botReplying = false;
-  }
+  await provider.sendMessage(chatId, text);
 }
 
 /**
@@ -137,23 +89,15 @@ async function sendClaudeResponse(msg, chatId, responseText) {
       await botSendChunks(msg, detected.textBefore);
     }
 
-    if (detected.options.length <= 12 && provider.name === 'webjs') {
-      // Send as native WhatsApp poll (webjs only, max 12 options)
-      setPendingPoll(chatId, { options: detected.options, chatId });
-      await botSendPoll(chatId, detected.pollQuestion, detected.options);
-      setQuickReplies(chatId, detected.options);
-      logger.info(`Options detected: ${detected.options.length} choices sent as poll`);
-    } else {
-      // Too many for poll or Cloud API — send as numbered text list
-      let optionText = `*${detected.pollQuestion}*\n\n`;
-      detected.options.forEach((opt, i) => {
-        optionText += `${i + 1}. ${opt}\n`;
-      });
-      optionText += `\n_Reply with a number (1-${detected.options.length}) to choose._`;
-      await botSendChunks(msg, optionText);
-      setQuickReplies(chatId, detected.options);
-      logger.info(`Options detected: ${detected.options.length} choices sent as text list`);
-    }
+    // Cloud API doesn't support native polls — send as numbered text list
+    let optionText = `*${detected.pollQuestion}*\n\n`;
+    detected.options.forEach((opt, i) => {
+      optionText += `${i + 1}. ${opt}\n`;
+    });
+    optionText += `\n_Reply with a number (1-${detected.options.length}) to choose._`;
+    await botSendChunks(msg, optionText);
+    setQuickReplies(chatId, detected.options);
+    logger.info(`Options detected: ${detected.options.length} choices sent as text list`);
 
     // Send any text after the options
     if (detected.textAfter) {
@@ -172,26 +116,15 @@ async function sendClaudeResponse(msg, chatId, responseText) {
 async function handlePrompt(msg, chatId, prompt, mediaPath, senderName) {
   const isGroup = chatId.endsWith('@g.us');
 
-  if (isGroup) {
-    if (!acquireGroupLock(chatId)) {
-      // Queue it for groups too
-      if (!messageQueue.has(chatId)) messageQueue.set(chatId, []);
-      const queue = messageQueue.get(chatId);
-      queue.push({ msg, chatId, prompt, mediaPath, senderName });
-      await botReply(msg, `📋 Queued (#${queue.length} in line). I'll get to it after the current task.`);
-      return;
-    }
-  } else {
-    if (processing.has(chatId)) {
-      // Queue the message instead of rejecting
-      if (!messageQueue.has(chatId)) messageQueue.set(chatId, []);
-      const queue = messageQueue.get(chatId);
-      queue.push({ msg, chatId, prompt, mediaPath, senderName });
-      await botReply(msg, `📋 Queued (#${queue.length} in line). I'll get to it after the current task.`);
-      return;
-    }
-    processing.add(chatId);
+  if (processing.has(chatId)) {
+    // Queue the message instead of rejecting
+    if (!messageQueue.has(chatId)) messageQueue.set(chatId, []);
+    const queue = messageQueue.get(chatId);
+    queue.push({ msg, chatId, prompt, mediaPath, senderName });
+    await botReply(msg, `📋 Queued (#${queue.length} in line). I'll get to it after the current task.`);
+    return;
   }
+  processing.add(chatId);
 
   await botReply(msg, '⚡ Working on it...');
 
@@ -224,8 +157,7 @@ async function handlePrompt(msg, chatId, prompt, mediaPath, senderName) {
       }
     }
   } finally {
-    if (isGroup) releaseGroupLock(chatId);
-    else processing.delete(chatId);
+    processing.delete(chatId);
     await provider.clearTyping(chatId);
     // Clean up media for this task
     if (mediaPath) {
@@ -302,9 +234,6 @@ Numbered options → tap the poll or reply with 1, 2, 3...
 
 Claude has *full permissions* — it does everything independently.`;
 
-// Cache of allowed group IDs (groups with "claude" in name)
-const allowedGroups = new Set();
-
 // Returns true if the given WA ID is a configured admin
 function isAdmin(waId) {
   if (!waId) return false;
@@ -312,32 +241,14 @@ function isAdmin(waId) {
   return config.adminNumbers.includes(waId);
 }
 
-async function isAllowedChat(chatId, msg) {
-  // Open access mode (standalone Cloud API bot): all DMs allowed
+function isAllowedChat(chatId) {
+  // Open access mode: all DMs allowed
   if (config.openAccess && !chatId.endsWith('@g.us')) return true;
 
-  // Always allow self-chat (DM with bot owner)
+  // Allow specific target chat (DM with bot owner)
   if (config.targetChat && chatId === config.targetChat) return true;
 
-  // Check if it's a group chat
-  const isGroup = chatId.endsWith('@g.us');
-  if (!isGroup) return false;
-
-  // Check cache first
-  if (allowedGroups.has(chatId)) return true;
-
-  // Ask provider to check if this is a "claude" group
-  try {
-    const isClaudeGrp = await provider.isClaudeGroup(chatId);
-    if (isClaudeGrp) {
-      allowedGroups.add(chatId);
-      logger.info(`Allowed group: ${chatId}`);
-      return true;
-    }
-  } catch (e) {
-    logger.error('Error checking group:', e.message);
-  }
-
+  // Reject everything else (groups not yet supported in Cloud API)
   return false;
 }
 
@@ -365,15 +276,10 @@ function isBotGeneratedMessage(text) {
 provider.on('ready', () => {
   // Initialize scheduler with provider-based send function
   scheduler.init(provider, async (chatId, text) => {
-    botReplying = true;
-    try {
-      const sentId = await provider.sendMessage(chatId, text);
-      if (sentId) {
-        botSentMessageIds.add(sentId);
-        setTimeout(() => botSentMessageIds.delete(sentId), 30000);
-      }
-    } finally {
-      botReplying = false;
+    const sentId = await provider.sendMessage(chatId, text);
+    if (sentId) {
+      botSentMessageIds.add(sentId);
+      setTimeout(() => botSentMessageIds.delete(sentId), 30000);
     }
   });
 });
@@ -382,21 +288,8 @@ provider.on('message', async (msg) => {
   const chatId = msg.chatId;
   const isGroup = msg.isGroup;
 
-  // For webjs DMs, only process our own outgoing messages
-  if (provider.name === 'webjs' && !isGroup && !msg.fromMe) return;
-
-  // Cloud API messages are always incoming (not fromMe), so they always pass through
-
   // Check if chat is allowed
-  if (!(await isAllowedChat(chatId, msg))) return;
-
-  // For non-fromMe group messages, dedup across bot instances
-  if (isGroup && !msg.fromMe) {
-    if (!claimGroupMessage(msg.id)) return;
-  }
-
-  // Skip if bot is sending a reply (webjs only — Cloud API doesn't re-trigger)
-  if (botReplying && provider.name === 'webjs') return;
+  if (!isAllowedChat(chatId)) return;
 
   // Skip messages the bot itself sent (via scheduler or HTTP API)
   if (msg.fromMe && botSentMessageIds.has(msg.id)) {
@@ -445,7 +338,6 @@ provider.on('message', async (msg) => {
       if (isRunning(chatId)) {
         stopClaude(chatId);
         processing.delete(chatId);
-        if (chatId.endsWith('@g.us')) releaseGroupLock(chatId);
 
         if (clearAll) {
           await botReply(msg, `⛔ Stopped current task and cleared queue (${qLen} pending).`);
@@ -599,9 +491,7 @@ provider.on('message', async (msg) => {
         const MEDIA_DIR = path.join(__dirname, '..', 'media_tmp');
         const imageUrl = await apiCommands.imagine(prompt);
         const localPath = await apiCommands.downloadImageToTemp(imageUrl, MEDIA_DIR);
-        botReplying = true;
-        try { await provider.replyWithMedia(msg, localPath, { caption: `🎨 _${prompt}_` }); }
-        finally { botReplying = false; }
+        await provider.replyWithMedia(msg, localPath, { caption: `🎨 _${prompt}_` });
         try { fs.unlinkSync(localPath); } catch {}
       } catch (e) {
         await botReply(msg, `❌ Image generation failed: ${e.message}`);
@@ -609,12 +499,9 @@ provider.on('message', async (msg) => {
       return;
     }
 
-    // /files — list files in the group sandbox workspace (TASK-005)
+    // /files — list files in the workspace (TASK-005)
     if (caption.toLowerCase() === '/files') {
-      const { getSandboxDir } = require('./docker');
-      const workspaceDir = isGroup
-        ? path.join(getSandboxDir(chatId), 'workspace')
-        : (getProjectDir(chatId) || process.env.HOME);
+      const workspaceDir = getProjectDir(chatId) || process.env.HOME;
 
       let entries = [];
       try {
@@ -869,9 +756,7 @@ provider.on('message', async (msg) => {
         } else {
           await botReply(msg, `📤 Sending *${name}*...`);
           try {
-            botReplying = true;
-            try { await provider.replyWithMedia(msg, fullPath, { sendMediaAsDocument: true }); }
-            finally { botReplying = false; }
+            await provider.replyWithMedia(msg, fullPath, { sendMediaAsDocument: true });
           } catch (e) {
             await botReply(msg, `❌ Failed to send file: ${e.message}`);
           }
@@ -953,71 +838,6 @@ provider.on('message', async (msg) => {
   await handlePrompt(msg, chatId, prompt, mediaPath, senderName);
 });
 
-// Listen for poll votes (webjs only — Cloud API doesn't support polls)
-provider.on('poll_vote', async (vote) => {
-  try {
-    const chatId = vote.chatId;
-    const selectedName = vote.selectedOption;
-
-    // Only handle votes from allowed chats
-    if (!allowedGroups.has(chatId)) {
-      const isClaudeGrp = await provider.isClaudeGroup(chatId);
-      if (!isClaudeGrp) {
-        logger.info(`vote_update: ignoring vote from non-claude chat ${chatId}`);
-        return;
-      }
-      allowedGroups.add(chatId);
-    }
-
-    logger.info(`Poll vote received: "${selectedName}" in chat ${chatId}`);
-
-    // Check if this is a project selection poll
-    const projPoll = getPendingProjectPoll(chatId);
-    if (projPoll) {
-      const idx = projPoll.options.indexOf(selectedName);
-      if (idx >= 0 && idx < projPoll.dirs.length) {
-        const dir = projPoll.dirs[idx];
-        try {
-          setProjectDir(chatId, dir);
-          clearSession(chatId);
-          clearPendingProjectPoll(chatId);
-          clearQuickReplies(chatId);
-          await botSendMessage(chatId, `📂 Project set: *${path.basename(dir)}*\n${dir}\n\nClaude will now run from this directory. Session reset.\nSend a message to start working!`);
-        } catch (e) {
-          await botSendMessage(chatId, `❌ ${e.message}`);
-        }
-        return;
-      }
-      clearPendingProjectPoll(chatId);
-    }
-
-    // Clear pending poll
-    clearPendingPoll(chatId);
-    clearQuickReplies(chatId);
-
-    // Send the selected option to Claude
-    const prompt = `I choose: ${selectedName}`;
-    await botSendMessage(chatId, `✅ Selected: *${selectedName}*`);
-
-    // Create a minimal msg-like object for handlePrompt
-    const fakeMsgForVote = {
-      id: 'vote_' + Date.now(),
-      chatId,
-      senderId: vote.voter || chatId,
-      type: 'chat',
-      body: prompt,
-      fromMe: false,
-      isGroup: chatId.endsWith('@g.us'),
-      hasMedia: false,
-      _raw: null,
-    };
-
-    await handlePrompt(fakeMsgForVote, chatId, prompt);
-  } catch (e) {
-    logger.error('Error handling vote:', e.message);
-  }
-});
-
 // --- Internal HTTP API for external services (e.g. Shorty trading bot) ---
 const http = require('http');
 const INTERNAL_API_PORT = config.httpPort;
@@ -1072,5 +892,5 @@ async function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-logger.info(`Initializing WhatsApp provider (${config.whatsappProvider})...`);
+logger.info('Initializing Cloud API provider...');
 provider.initialize();

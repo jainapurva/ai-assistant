@@ -1,13 +1,13 @@
 const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
-const { runClaude, isGroupChat, STATE_FILE, withSharedStateLock, loadSharedState, saveSharedState } = require('./claude');
+const { runClaude, STATE_FILE } = require('./claude');
 const logger = require('./logger');
 
 // Active cron jobs: id -> cron.ScheduledTask
 const activeJobs = new Map();
 
-// Provider reference (set via init) — can be webjs or cloud-api provider
+// Provider reference (set via init)
 let waProvider = null;
 
 // Callback for sending messages (set via init) — allows index.js to track sent IDs
@@ -34,108 +34,62 @@ function generateId() {
   return 'sched_' + Math.random().toString(36).slice(2, 10);
 }
 
-// --- State persistence ---
+// --- State persistence (all tasks in local STATE_FILE) ---
 function loadScheduledTasks() {
-  const tasks = [];
-  // Load from DM state (no lock needed — only this instance writes to STATE_FILE)
   try {
     if (fs.existsSync(STATE_FILE)) {
       const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      if (data.scheduledTasks) tasks.push(...data.scheduledTasks);
+      return data.scheduledTasks || [];
     }
   } catch (e) {}
-  // Load from shared state (groups) — use lock to get consistent read
-  try {
-    withSharedStateLock(() => {
-      const data = loadSharedState();
-      if (data.scheduledTasks) tasks.push(...data.scheduledTasks);
-    });
-  } catch (e) {}
-  return tasks;
+  return [];
 }
 
 function saveScheduledTask(task) {
-  if (isGroupChat(task.chatId)) {
-    withSharedStateLock(() => {
-      const data = loadSharedState();
-      if (!data.scheduledTasks) data.scheduledTasks = [];
-      data.scheduledTasks.push(task);
-      saveSharedState(data);
-    });
-  } else {
-    try {
-      let data = {};
-      if (fs.existsSync(STATE_FILE)) data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      if (!data.scheduledTasks) data.scheduledTasks = [];
-      data.scheduledTasks.push(task);
-      fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
-    } catch (e) {
-      logger.warn('Failed to save scheduled task:', e.message);
-    }
+  try {
+    let data = {};
+    if (fs.existsSync(STATE_FILE)) data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if (!data.scheduledTasks) data.scheduledTasks = [];
+    data.scheduledTasks.push(task);
+    fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
+  } catch (e) {
+    logger.warn('Failed to save scheduled task:', e.message);
   }
 }
 
-function removeScheduledTask(taskId, chatId) {
-  if (isGroupChat(chatId)) {
-    withSharedStateLock(() => {
-      const data = loadSharedState();
-      if (!data.scheduledTasks) return;
-      data.scheduledTasks = data.scheduledTasks.filter(t => t.id !== taskId);
-      saveSharedState(data);
-    });
-  } else {
-    try {
-      if (!fs.existsSync(STATE_FILE)) return;
-      const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      if (!data.scheduledTasks) return;
-      data.scheduledTasks = data.scheduledTasks.filter(t => t.id !== taskId);
-      fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
-    } catch (e) {
-      logger.warn('Failed to remove scheduled task:', e.message);
-    }
+function removeScheduledTask(taskId) {
+  try {
+    if (!fs.existsSync(STATE_FILE)) return;
+    const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if (!data.scheduledTasks) return;
+    data.scheduledTasks = data.scheduledTasks.filter(t => t.id !== taskId);
+    fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
+  } catch (e) {
+    logger.warn('Failed to remove scheduled task:', e.message);
   }
 }
 
 function removeAllScheduledTasks(chatId) {
-  if (isGroupChat(chatId)) {
-    withSharedStateLock(() => {
-      const data = loadSharedState();
-      if (!data.scheduledTasks) return;
-      data.scheduledTasks = data.scheduledTasks.filter(t => t.chatId !== chatId);
-      saveSharedState(data);
-    });
-  } else {
-    try {
-      if (!fs.existsSync(STATE_FILE)) return;
-      const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      if (!data.scheduledTasks) return;
-      data.scheduledTasks = data.scheduledTasks.filter(t => t.chatId !== chatId);
-      fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
-    } catch (e) {
-      logger.warn('Failed to remove scheduled tasks:', e.message);
-    }
+  try {
+    if (!fs.existsSync(STATE_FILE)) return;
+    const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if (!data.scheduledTasks) return;
+    data.scheduledTasks = data.scheduledTasks.filter(t => t.chatId !== chatId);
+    fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
+  } catch (e) {
+    logger.warn('Failed to remove scheduled tasks:', e.message);
   }
 }
 
-function updateTaskLastRun(taskId, chatId, status) {
-  if (isGroupChat(chatId)) {
-    withSharedStateLock(() => {
-      const data = loadSharedState();
-      if (!data.scheduledTasks) return;
-      const task = data.scheduledTasks.find(t => t.id === taskId);
-      if (task) { task.lastRun = Date.now(); task.lastStatus = status; }
-      saveSharedState(data);
-    });
-  } else {
-    try {
-      if (!fs.existsSync(STATE_FILE)) return;
-      const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-      if (!data.scheduledTasks) return;
-      const task = data.scheduledTasks.find(t => t.id === taskId);
-      if (task) { task.lastRun = Date.now(); task.lastStatus = status; }
-      fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
-    } catch (e) {}
-  }
+function updateTaskLastRun(taskId, status) {
+  try {
+    if (!fs.existsSync(STATE_FILE)) return;
+    const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    if (!data.scheduledTasks) return;
+    const task = data.scheduledTasks.find(t => t.id === taskId);
+    if (task) { task.lastRun = Date.now(); task.lastStatus = status; }
+    fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
+  } catch (e) {}
 }
 
 // --- Cron job management ---
@@ -173,7 +127,7 @@ function registerJob(task) {
       const cleaned = result.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').trim();
       const prefix = `*[Scheduled]* ${task.friendlyInterval || task.cron}\n\n`;
       await send(task.chatId, prefix + (cleaned || '✅ Done (no text output)'));
-      updateTaskLastRun(task.id, task.chatId, 'completed');
+      updateTaskLastRun(task.id, 'completed');
     } catch (e) {
       logger.error(`Scheduled task ${task.id} failed:`, e.message);
       try {
@@ -181,7 +135,7 @@ function registerJob(task) {
       } catch (sendErr) {
         logger.error(`Scheduled task ${task.id} error notification failed:`, sendErr.message);
       }
-      updateTaskLastRun(task.id, task.chatId, 'error');
+      updateTaskLastRun(task.id, 'error');
     }
   });
 
@@ -236,7 +190,7 @@ function listSchedules(chatId) {
 
 function removeSchedule(taskId, chatId) {
   unregisterJob(taskId);
-  removeScheduledTask(taskId, chatId);
+  removeScheduledTask(taskId);
 }
 
 function removeAllSchedules(chatId) {

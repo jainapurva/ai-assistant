@@ -4,5 +4,4 @@ node_modules/
 !.env.example
 media_tmp/
 bot_state*.json
-.bot-shared-state.json
 user-profiles.json

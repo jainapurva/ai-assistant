@@ -3,14 +3,12 @@ const EventEmitter = require('events');
 /**
  * Abstract base class for WhatsApp transport providers.
  *
- * Both webjs-provider and cloud-api-provider extend this class and
- * implement the same interface so bot logic in index.js stays
+ * Cloud API provider extends this class so bot logic in index.js stays
  * provider-agnostic.
  *
  * Events emitted:
  *   'ready'                — Provider connected and operational
  *   'message' (NormalizedMessage) — Incoming message
- *   'poll_vote' ({ chatId, selectedOption, voter }) — Poll vote (webjs only)
  *
  * NormalizedMessage shape:
  *   { id, chatId, senderId, type, body, fromMe, isGroup, hasMedia, author, pushName, _raw }

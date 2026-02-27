@@ -3,8 +3,6 @@ require('dotenv').config({ path: process.env.DOTENV_CONFIG_PATH || '.env' });
 const path = require('path');
 
 module.exports = {
-  instanceId: process.env.INSTANCE_ID || 'default',
-  instancePromptFile: process.env.INSTANCE_PROMPT_FILE || '',
   whitelistedNumber: process.env.WHITELISTED_NUMBER,
   targetChat: process.env.TARGET_CHAT,
   claudePath: process.env.CLAUDE_PATH || '/home/ddarji/.local/bin/claude',
@@ -19,8 +17,6 @@ module.exports = {
   adminNumbers: (process.env.ADMIN_NUMBERS || '').split(',').map(s => s.trim()).filter(Boolean),
   // Absolute paths for persistent state — must not change between prod/dev clones
   stateDir: process.env.BOT_STATE_DIR || path.join(__dirname, '..'),
-  // Base dir for per-group Docker sandbox dirs
-  sandboxDir: process.env.SANDBOX_BASE_DIR || '/media/ddarji/storage/bot-users',
   // Meta Cloud API settings
   metaAccessToken: process.env.META_ACCESS_TOKEN || '',
   metaAppSecret: process.env.META_APP_SECRET || '',
