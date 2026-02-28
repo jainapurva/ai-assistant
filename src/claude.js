@@ -5,6 +5,7 @@ const config = require('./config');
 const logger = require('./logger');
 const { buildSafeEnv, filterSensitiveOutput, SECURITY_SYSTEM_PROMPT } = require('./security');
 const sandbox = require('./sandbox');
+const gmail = require('./gmail');
 
 // Persistent state file — survives bot restarts
 const STATE_FILE = path.join(config.stateDir, 'bot_state.json');
@@ -220,8 +221,38 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false) {
     args.push('--resume', sessionId);
   }
 
-  // For new sessions, prepend the memory system prompt
-  const fullPrompt = hasSession ? prompt : MEMORY_SYSTEM_PROMPT + prompt;
+  // Build Gmail context if user has connected their account
+  let gmailPrompt = '';
+  if (gmail.isConfigured()) {
+    const gmailStatus = gmail.getStatus(chatId);
+    if (gmailStatus.connected) {
+      gmailPrompt = `
+GMAIL INTEGRATION:
+The user has connected their Gmail account (${gmailStatus.email}). You can send emails, search their inbox, and read emails on their behalf using the internal API.
+
+API base: http://host.docker.internal:${config.httpPort}
+Chat ID for all requests: ${chatId}
+
+To SEND an email:
+  curl -s -X POST http://host.docker.internal:${config.httpPort}/gmail/send -H 'Content-Type: application/json' -d '{"chatId":"${chatId}","to":"recipient@example.com","subject":"Subject here","body":"Email body here"}'
+
+To LIST/SEARCH inbox (returns JSON array of emails with id, from, to, subject, date, snippet):
+  curl -s -X POST http://host.docker.internal:${config.httpPort}/gmail/inbox -H 'Content-Type: application/json' -d '{"chatId":"${chatId}","query":"optional search query","maxResults":10}'
+
+To READ a specific email (returns full email with body):
+  curl -s -X POST http://host.docker.internal:${config.httpPort}/gmail/read -H 'Content-Type: application/json' -d '{"chatId":"${chatId}","messageId":"message_id_here"}'
+
+- When the user asks to send an email, compose it and send it directly. Don't ask for confirmation unless the request is ambiguous.
+- When the user asks about their emails, use the inbox/read endpoints.
+- The "query" field accepts Gmail search syntax (e.g. "from:user@example.com", "is:unread", "subject:invoice").
+`;
+    }
+  }
+
+  // For new sessions, prepend the memory system prompt + gmail context
+  const fullPrompt = hasSession
+    ? (gmailPrompt ? gmailPrompt + prompt : prompt)
+    : MEMORY_SYSTEM_PROMPT + gmailPrompt + prompt;
   args.push(fullPrompt);
 
   // Layer 2: whitelist-only env — strips all API keys, tokens, and secrets

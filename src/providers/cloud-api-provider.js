@@ -33,6 +33,9 @@ class CloudAPIProvider extends BaseProvider {
     this.server = null;
     this.connected = false;
 
+    // Custom routes registered by other modules (e.g. OAuth callbacks)
+    this._customRoutes = [];
+
     // Dedup: track processed message IDs (Meta can send duplicates / retries)
     this._processedMessages = new Set();
     this._processedMessagesTTL = 5 * 60 * 1000; // 5 min
@@ -72,6 +75,19 @@ class CloudAPIProvider extends BaseProvider {
     return this.connected ? 'CONNECTED' : 'DISCONNECTED';
   }
 
+  // ---------- Route registration ----------
+
+  /**
+   * Register a custom route on the webhook HTTP server.
+   * @param {string} method - HTTP method (GET, POST, etc.)
+   * @param {string} pathPrefix - URL path prefix to match
+   * @param {Function} handler - (req, res) handler function
+   */
+  addRoute(method, pathPrefix, handler) {
+    this._customRoutes.push({ method: method.toUpperCase(), pathPrefix, handler });
+    logger.info(`Registered route: ${method.toUpperCase()} ${pathPrefix}`);
+  }
+
   // ---------- HTTP request handler ----------
 
   _handleRequest(req, res) {
@@ -80,6 +96,13 @@ class CloudAPIProvider extends BaseProvider {
     } else if (req.method === 'POST' && req.url.startsWith('/webhook')) {
       this._handleWebhook(req, res);
     } else {
+      // Check custom routes before returning 404
+      for (const route of this._customRoutes) {
+        if (req.method === route.method && req.url.startsWith(route.pathPrefix)) {
+          route.handler(req, res);
+          return;
+        }
+      }
       res.writeHead(404);
       res.end();
     }
