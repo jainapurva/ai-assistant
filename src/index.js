@@ -7,6 +7,7 @@ const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearS
 const { ensureProfile, getProfile, registerUser, getAllProfiles, formatProfileCard } = require('./profiles');
 const apiCommands = require('./api-commands');
 const drive = require('./drive');
+const gmail = require('./gmail');
 const { stripAnsi, chunkMessage } = require('./formatter');
 const { detectOptions } = require('./options');
 const { discoverProjects, getProjectSummary } = require('./projects');
@@ -233,6 +234,7 @@ Claude loads CLAUDE.md, skills & commands from the project dir.
 /files - List & download files from your workspace
 /imagine <prompt> - Generate an image (DALL-E 3)
 /drive - List files uploaded to Google Drive
+/gmail - Gmail status, login, send, inbox, read
 /sandbox - View sandbox status & disk usage
 /sandbox clean - Clean sandbox workspace
 /isolate - Give this group its own sandbox (separate from your DM)
@@ -295,6 +297,44 @@ const BOT_MESSAGE_PREFIXES = [
 
 function isBotGeneratedMessage(text) {
   return BOT_MESSAGE_PREFIXES.some(prefix => text.startsWith(prefix));
+}
+
+// --- Gmail OAuth callback (registered on public webhook server) ---
+
+if (gmail.isConfigured()) {
+  provider.addRoute('GET', '/auth/google/callback', async (req, res) => {
+    try {
+      const url = new URL(req.url, `http://localhost:${config.webhookPort}`);
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      const error = url.searchParams.get('error');
+
+      if (error) {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<h2>Authorization cancelled.</h2><p>You can close this window and try /gmail login again in WhatsApp.</p>');
+        return;
+      }
+
+      if (!code || !state) {
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end('<h2>Missing authorization code.</h2>');
+        return;
+      }
+
+      const result = await gmail.handleCallback(code, state);
+
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<h2>Gmail connected!</h2><p>Signed in as <b>${result.email}</b>.</p><p>You can close this window and return to WhatsApp.</p>`);
+
+      // Notify user on WhatsApp
+      await botSendMessage(result.waId, `*Gmail connected!*\n\nSigned in as *${result.email}*.\n\nYou can now:\n\`/gmail send user@example.com Subject | Body\`\n\`/gmail inbox\` — view recent emails\n\`/gmail read <id>\` — read an email\n\`/gmail logout\` — disconnect`);
+    } catch (e) {
+      logger.error('Gmail OAuth callback error:', e.message);
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<h2>Authorization failed.</h2><p>${e.message}</p><p>Please try /gmail login again.</p>`);
+    }
+  });
+  logger.info('Gmail integration enabled');
 }
 
 // --- Provider event handlers ---
@@ -771,6 +811,106 @@ provider.on('message', async (msg) => {
       return;
     }
 
+    // /gmail [status|login|logout|send|inbox|read] — Gmail integration
+    const gmailMatch = caption.match(/^\/gmail(?:\s+(.*))?$/is);
+    if (gmailMatch) {
+      if (!gmail.isConfigured()) {
+        await botReply(msg, '❌ Gmail is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI in .env.');
+        return;
+      }
+
+      const gmailSenderId = senderId || config.whitelistedNumber;
+      const rawArgs = (gmailMatch[1] || '').trim();
+      const subcommand = rawArgs.toLowerCase().split(/\s+/)[0] || '';
+
+      // /gmail or /gmail status
+      if (!subcommand || subcommand === 'status') {
+        const status = gmail.getStatus(gmailSenderId);
+        if (status.connected) {
+          await botReply(msg, `*Gmail connected*\n\nSigned in as *${status.email}*\nConnected: ${new Date(status.connectedAt).toLocaleDateString()}\n\nCommands:\n\`/gmail send <to> <subject> | <body>\`\n\`/gmail inbox [query]\`\n\`/gmail read <id>\`\n\`/gmail logout\``);
+        } else {
+          await botReply(msg, `*Gmail not connected*\n\nUse \`/gmail login\` to connect your Gmail account.`);
+        }
+        return;
+      }
+
+      // /gmail login
+      if (subcommand === 'login') {
+        const authUrl = gmail.getAuthUrl(gmailSenderId);
+        await botReply(msg, `*Connect your Gmail*\n\nTap the link below to authorize:\n${authUrl}\n\n_Link expires in 10 minutes._`);
+        return;
+      }
+
+      // /gmail logout
+      if (subcommand === 'logout') {
+        gmail.removeUserTokens(gmailSenderId);
+        await botReply(msg, 'Gmail disconnected. Your tokens have been removed.');
+        return;
+      }
+
+      // /gmail send <to> <subject> | <body>
+      const sendMatch = rawArgs.match(/^send\s+(\S+)\s+(.+?)\s*\|\s*(.+)/is);
+      if (sendMatch) {
+        const [, to, subject, body] = sendMatch;
+        await botReply(msg, 'Sending email...');
+        try {
+          const result = await gmail.sendEmail(gmailSenderId, to.trim(), subject.trim(), body.trim());
+          await botReply(msg, `*Email sent!*\n\nFrom: ${result.from}\nTo: ${result.to}\nSubject: ${result.subject}`);
+        } catch (e) {
+          await botReply(msg, `❌ Failed to send email: ${e.message}`);
+        }
+        return;
+      }
+
+      // /gmail inbox [query]
+      if (subcommand === 'inbox') {
+        const query = rawArgs.replace(/^inbox\s*/i, '').trim() || null;
+        await botReply(msg, 'Fetching emails...');
+        try {
+          const emails = await gmail.listEmails(gmailSenderId, query, 10);
+          if (emails.length === 0) {
+            await botReply(msg, 'No emails found.');
+          } else {
+            const lines = emails.map((e, i) =>
+              `*${i + 1}.* ${e.subject || '(no subject)'}\n   From: ${e.from}\n   ${e.date}\n   ID: \`${e.id}\``
+            ).join('\n\n');
+            await botSendChunks(msg, `*Inbox${query ? ` — "${query}"` : ''}:*\n\n${lines}\n\n_Use \`/gmail read <id>\` to read an email._`);
+          }
+        } catch (e) {
+          await botReply(msg, `❌ Failed to fetch emails: ${e.message}`);
+        }
+        return;
+      }
+
+      // /gmail read <messageId>
+      if (subcommand === 'read') {
+        const messageId = rawArgs.replace(/^read\s*/i, '').trim();
+        if (!messageId) {
+          await botReply(msg, 'Usage: `/gmail read <message-id>`\n\nGet message IDs from `/gmail inbox`.');
+          return;
+        }
+        try {
+          const email = await gmail.getEmail(gmailSenderId, messageId);
+          const text = [
+            `*${email.subject || '(no subject)'}*`,
+            `From: ${email.from}`,
+            `To: ${email.to}`,
+            `Date: ${email.date}`,
+            '',
+            email.body || '(empty)',
+          ].join('\n');
+          await botSendChunks(msg, text);
+        } catch (e) {
+          await botReply(msg, `❌ Failed to read email: ${e.message}`);
+        }
+        return;
+      }
+
+      // Unknown subcommand — show help
+      await botReply(msg, `*Gmail commands:*\n\n\`/gmail\` — Connection status\n\`/gmail login\` — Connect your Gmail\n\`/gmail logout\` — Disconnect Gmail\n\`/gmail send <to> <subject> | <body>\` — Send email\n\`/gmail inbox [query]\` — List/search emails\n\`/gmail read <id>\` — Read an email`);
+      return;
+    }
+
     // /model [name] — view or set the Claude model for this chat (admin-only in groups)
     const modelMatch = caption.match(/^\/model(?:\s+(.+))?$/i);
     if (modelMatch) {
@@ -1054,6 +1194,60 @@ const apiServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: e.message }));
       }
     });
+  } else if (req.method === 'POST' && req.url === '/gmail/send') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, to, subject, body: emailBody } = JSON.parse(body);
+        if (!chatId || !to || !subject || !emailBody) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, to, subject, and body required' }));
+        }
+        const result = await gmail.sendEmail(chatId, to, subject, emailBody);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'sent', ...result }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/gmail/inbox') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, query, maxResults } = JSON.parse(body);
+        if (!chatId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId required' }));
+        }
+        const emails = await gmail.listEmails(chatId, query || null, maxResults || 10);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ emails }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/gmail/read') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, messageId } = JSON.parse(body);
+        if (!chatId || !messageId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId and messageId required' }));
+        }
+        const email = await gmail.getEmail(chatId, messageId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ email }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
   } else if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok' }));
@@ -1063,8 +1257,8 @@ const apiServer = http.createServer(async (req, res) => {
   }
 });
 
-apiServer.listen(INTERNAL_API_PORT, '127.0.0.1', () => {
-  logger.info(`Internal API listening on 127.0.0.1:${INTERNAL_API_PORT}`);
+apiServer.listen(INTERNAL_API_PORT, '0.0.0.0', () => {
+  logger.info(`Internal API listening on 0.0.0.0:${INTERNAL_API_PORT}`);
 });
 
 // Prevent protocol errors from crashing Node

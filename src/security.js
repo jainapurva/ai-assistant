@@ -71,6 +71,8 @@ const SECRET_PATTERNS = [
   { label: 'credential value',   re: /(?:password|passwd|secret|api[_-]?key|token|credential)\s*[=:]\s*['"]?[A-Za-z0-9+/=_\-!@#$%^&*]{16,}['"]?/gi },
   // Gmail app passwords: groups of 4 letters (xxxx xxxx xxxx xxxx)
   { label: 'app password',       re: /\b[a-z]{4}\s[a-z]{4}\s[a-z]{4}\s[a-z]{4}\b/gi },
+  // Google OAuth access tokens (start with ya29.)
+  { label: 'Google OAuth token', re: /ya29\.[A-Za-z0-9_-]{20,}/g },
 ];
 
 /**

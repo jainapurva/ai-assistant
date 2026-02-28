@@ -33,4 +33,8 @@ module.exports = {
   sandboxPidsLimit: process.env.SANDBOX_PIDS_LIMIT || '256',
   sandboxWorkspaceMaxMB: parseInt(process.env.SANDBOX_WORKSPACE_MAX_MB || '500', 10),
   sandboxIdleTimeoutMs: parseInt(process.env.SANDBOX_IDLE_TIMEOUT_MS || '86400000', 10),
+  // Google OAuth2 (for per-user Gmail integration)
+  googleClientId: process.env.GOOGLE_CLIENT_ID || '',
+  googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
+  googleRedirectUri: process.env.GOOGLE_REDIRECT_URI || '',
 };

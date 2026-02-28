@@ -145,6 +145,8 @@ async function ensureContainer(chatId) {
       '--pids-limit', config.sandboxPidsLimit,
       // Tmpfs for /tmp — prevents overlay bloat from temp files
       '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',
+      // Allow container to reach host services (internal API)
+      '--add-host', 'host.docker.internal:host-gateway',
       // Security
       '--security-opt', 'no-new-privileges',
       IMAGE_NAME,
