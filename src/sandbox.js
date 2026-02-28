@@ -170,7 +170,8 @@ async function spawnInContainer(chatId, args, env) {
   // Build docker exec args with env vars
   const dockerArgs = ['exec'];
 
-  // Pass through environment variables
+  // Pass through environment variables, but override HOME and USER
+  // for the container's filesystem layout (credentials at /home/claude/.claude/)
   if (env) {
     for (const [key, val] of Object.entries(env)) {
       if (val !== undefined && val !== null) {
@@ -178,6 +179,9 @@ async function spawnInContainer(chatId, args, env) {
       }
     }
   }
+  // Always override HOME/USER to match the container's claude user
+  dockerArgs.push('-e', 'HOME=/home/claude');
+  dockerArgs.push('-e', 'USER=claude');
 
   dockerArgs.push(containerName, 'claude', ...args);
 

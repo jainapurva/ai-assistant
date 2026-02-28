@@ -311,12 +311,19 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false) {
       let result = stdout;
       let tokens = null;
 
+      // DEBUG: log raw stdout for diagnosis
+      logger.info(`Raw stdout (${stdout.length} bytes): ${stdout.slice(0, 500)}`);
+      if (stderr.trim()) {
+        logger.info(`Raw stderr: ${stderr.slice(0, 500)}`);
+      }
+
       // Claude CLI may print warnings to stdout before the JSON line.
       // Extract the last JSON object from stdout to handle this.
       let jsonToParse = stdout;
       const jsonMatch = stdout.match(/(\{[^\n]*"type"\s*:\s*"result"[^\n]*\})\s*$/);
       if (jsonMatch) {
         jsonToParse = jsonMatch[1];
+        logger.info(`JSON extracted via regex (${jsonToParse.length} bytes)`);
       }
 
       try {
@@ -334,10 +341,11 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false) {
         }
         result = json.result || stdout;
       } catch (e) {
-        logger.warn('Failed to parse JSON output, using raw text');
+        logger.warn(`Failed to parse JSON output (${e.message}), using raw text`);
         // If raw stdout has non-JSON prefix lines, try to extract just the last line
         const lines = stdout.trim().split('\n');
         const lastLine = lines[lines.length - 1];
+        logger.info(`Last line fallback: ${lastLine.slice(0, 300)}`);
         try {
           const fallback = JSON.parse(lastLine);
           result = fallback.result || lastLine;
