@@ -3,15 +3,17 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const { createProvider } = require('./providers');
-const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearSession, setProjectDir, getProjectDir, clearProjectDir, setChatModel, getChatModel, clearChatModel, getTokenUsage, resetTokenUsage } = require('./claude');
+const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearSession, setProjectDir, getProjectDir, clearProjectDir, setChatModel, getChatModel, clearChatModel, getTokenUsage, resetTokenUsage, isGreeted, markGreeted, isSubscribed, addSubscription, removeSubscription, getSubscribedUsers, isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup, getSandboxKey } = require('./claude');
 const { ensureProfile, getProfile, registerUser, getAllProfiles, formatProfileCard } = require('./profiles');
 const apiCommands = require('./api-commands');
 const drive = require('./drive');
 const { stripAnsi, chunkMessage } = require('./formatter');
 const { detectOptions } = require('./options');
 const { discoverProjects, getProjectSummary } = require('./projects');
+const sandbox = require('./sandbox');
 const scheduler = require('./scheduler');
 const logger = require('./logger');
+const chatLogger = require('./chat-logger');
 
 // Validate config: in non-open-access mode, whitelisted number is required
 if (!config.openAccess) {
@@ -113,20 +115,18 @@ async function sendClaudeResponse(msg, chatId, responseText) {
 /**
  * Main handler: process a prompt and send to Claude
  */
-async function handlePrompt(msg, chatId, prompt, mediaPath, senderName) {
+async function handlePrompt(msg, chatId, prompt, mediaPath, senderName, senderId) {
   const isGroup = chatId.endsWith('@g.us');
 
   if (processing.has(chatId)) {
     // Queue the message instead of rejecting
     if (!messageQueue.has(chatId)) messageQueue.set(chatId, []);
     const queue = messageQueue.get(chatId);
-    queue.push({ msg, chatId, prompt, mediaPath, senderName });
+    queue.push({ msg, chatId, prompt, mediaPath, senderName, senderId });
     await botReply(msg, `📋 Queued (#${queue.length} in line). I'll get to it after the current task.`);
     return;
   }
   processing.add(chatId);
-
-  await botReply(msg, '⚡ Working on it...');
 
   // For group chats, prefix with sender name so Claude knows who's talking
   if (isGroup) {
@@ -136,22 +136,43 @@ async function handlePrompt(msg, chatId, prompt, mediaPath, senderName) {
 
   await provider.sendTyping(chatId);
 
+  // Log the user message
+  const logSenderId = senderId || config.whitelistedNumber;
+  chatLogger.logUserMessage(logSenderId, chatId, prompt);
+
+  // Only show "Working on it..." if Claude takes more than 5 seconds
+  const WORKING_DELAY_MS = 5000;
+  let workingSent = false;
+  const workingTimer = setTimeout(async () => {
+    try {
+      workingSent = true;
+      await botReply(msg, '⚡ Working on it...');
+    } catch (e) {}
+  }, WORKING_DELAY_MS);
+
   try {
-    const rawResponse = await runClaude(prompt, chatId);
+    const sbKey = getSandboxKey(chatId, senderId || config.whitelistedNumber);
+    const rawResponse = await runClaude(prompt, chatId, sbKey);
+    clearTimeout(workingTimer);
     const cleaned = stripAnsi(rawResponse).trim();
 
     if (!cleaned) {
+      chatLogger.logAIResponse(logSenderId, chatId, '(no text output)');
       await botReply(msg, '✅ Done (no text output)');
       return;
     }
 
+    chatLogger.logAIResponse(logSenderId, chatId, cleaned);
     await sendClaudeResponse(msg, chatId, cleaned);
     logger.info(`Response sent (${cleaned.length} chars)`);
   } catch (err) {
+    clearTimeout(workingTimer);
     if (err.message === 'STOPPED_BY_USER') {
       logger.info(`Task stopped by user for chat ${chatId}`);
+      chatLogger.logError(logSenderId, chatId, 'Stopped by user');
     } else {
       logger.error('Error processing message:', err.message);
+      chatLogger.logError(logSenderId, chatId, err.message);
       try { await botReply(msg, `❌ Error: ${err.message}`); } catch (e) {
         logger.error('Failed to send error reply:', e.message);
       }
@@ -176,7 +197,7 @@ function processQueue(chatId) {
   if (queue.length === 0) messageQueue.delete(chatId);
   logger.info(`Dequeuing next message for ${chatId} (${queue ? queue.length : 0} remaining)`);
   // Fire and forget — handlePrompt manages its own lifecycle
-  handlePrompt(next.msg, next.chatId, next.prompt, next.mediaPath, next.senderName);
+  handlePrompt(next.msg, next.chatId, next.prompt, next.mediaPath, next.senderName, next.senderId);
 }
 
 function getQueueLength(chatId) {
@@ -212,6 +233,9 @@ Claude loads CLAUDE.md, skills & commands from the project dir.
 /files - List & download files from your workspace
 /imagine <prompt> - Generate an image (DALL-E 3)
 /drive - List files uploaded to Google Drive
+/sandbox - View sandbox status & disk usage
+/sandbox clean - Clean sandbox workspace
+/isolate - Give this group its own sandbox (separate from your DM)
 /stop - ⛔ Stop current task
 /stop all - ⛔ Stop + clear queue
 /reset - Clear session, project & queue
@@ -225,6 +249,9 @@ Claude loads CLAUDE.md, skills & commands from the project dir.
 /schedule every 30m <prompt> - Schedule task
 /schedules - List scheduled tasks
 /unschedule <id|all> - Remove scheduled task(s)
+/subscribe <number> - Add subscription for a user
+/unsubscribe <number> - Remove subscription
+/subscribers - List all subscribed users
 /enable <command> - Enable an API command for this chat
 /disable <command> - Disable an API command for this chat
 /profile <number> - View any user's profile
@@ -242,13 +269,12 @@ function isAdmin(waId) {
 }
 
 function isAllowedChat(chatId) {
-  // Open access mode: all DMs allowed
-  if (config.openAccess && !chatId.endsWith('@g.us')) return true;
+  // Open access mode: all chats allowed (DMs + groups)
+  if (config.openAccess) return true;
 
   // Allow specific target chat (DM with bot owner)
   if (config.targetChat && chatId === config.targetChat) return true;
 
-  // Reject everything else (groups not yet supported in Cloud API)
   return false;
 }
 
@@ -274,6 +300,9 @@ function isBotGeneratedMessage(text) {
 // --- Provider event handlers ---
 
 provider.on('ready', () => {
+  // Initialize sandbox system
+  sandbox.init();
+
   // Initialize scheduler with provider-based send function
   scheduler.init(provider, async (chatId, text) => {
     const sentId = await provider.sendMessage(chatId, text);
@@ -325,6 +354,31 @@ provider.on('message', async (msg) => {
 
   logger.info(`Message received [${chatId}]: type=${msg.type}, fromMe=${msg.fromMe}, sender=${senderId}, admin=${senderIsAdmin}, caption="${caption.slice(0, 100)}"`);
 
+  // Group gating: only subscribed users who are admins can interact
+  if (isGroup && !msg.fromMe) {
+    if (!isSubscribed(senderId) || !isAdmin(senderId)) {
+      logger.info(`Ignoring group message from ${senderId} in ${chatId} (subscribed=${isSubscribed(senderId)}, admin=${isAdmin(senderId)})`);
+      return;
+    }
+  }
+
+  // DM gating: in non-open-access mode, require subscription
+  if (!isGroup && !msg.fromMe && !config.openAccess && !isSubscribed(senderId)) {
+    logger.info(`Ignoring DM from unsubscribed user ${senderId}`);
+    return;
+  }
+
+  // Welcome message for first-time users (one greeting per user, not per chat)
+  if (!msg.fromMe && !isGreeted(senderId)) {
+    markGreeted(senderId);
+    await botSendMessage(chatId,
+      `Hey! I'm *Appy* 👋\n\n` +
+      `Think of me as your personal assistant who never sleeps and loves a good challenge.\n\n` +
+      `My job? Reduce the chaos around you. Whether it's answering questions, writing stuff, analyzing photos, or just brainstorming — I've got you.\n\n` +
+      `So, what's your first challenge? Let's go! 🚀`
+    );
+  }
+
   // Handle commands (text only)
   if (isText) {
     if (caption.toLowerCase() === '/stop' || caption.toLowerCase() === '/stop all') {
@@ -370,7 +424,10 @@ provider.on('message', async (msg) => {
       resetTokenUsage(chatId);
       pendingFilePolls.delete(chatId);
       messageQueue.delete(chatId);
-      await botReply(msg, '🔄 Session, project, queue, and usage counter cleared. Starting fresh.');
+      if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
+        sandbox.removeContainer(chatId);
+      }
+      await botReply(msg, '🔄 Session, project, queue, sandbox, and usage counter cleared. Starting fresh.');
       return;
     }
     if (caption.toLowerCase() === '/status') {
@@ -390,6 +447,15 @@ provider.on('message', async (msg) => {
         statusText += `\nModel: ${currentModel}\nProject: ${projDir}\n\nSend /stop to interrupt.`;
       } else {
         statusText += `✅ *Idle — no task running*\nModel: ${currentModel}\nProject: ${projDir}`;
+      }
+
+      // Show sandbox info if enabled
+      if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
+        const sbStatus = sandbox.getSandboxStatus(chatId);
+        statusText += `\n\n🐳 *Sandbox:* ${sbStatus.status}`;
+        if (sbStatus.exists) {
+          statusText += ` (${sbStatus.diskUsageMB}MB / ${sbStatus.maxDiskMB}MB)`;
+        }
       }
 
       // Show recent task history
@@ -431,6 +497,127 @@ provider.on('message', async (msg) => {
           `_Counters reset on /reset_`
         );
       }
+      return;
+    }
+
+    // /sandbox [clean|reset] — sandbox status and management
+    const sandboxMatch = caption.match(/^\/sandbox(?:\s+(clean|reset))?$/i);
+    if (sandboxMatch) {
+      if (!config.sandboxEnabled || !sandbox.isDockerAvailable()) {
+        await botReply(msg, '🐳 Sandbox is not enabled or Docker is unavailable.');
+        return;
+      }
+      const action = sandboxMatch[1] ? sandboxMatch[1].toLowerCase() : null;
+
+      if (action === 'clean') {
+        const removed = sandbox.cleanWorkspace(chatId);
+        await botReply(msg, `🧹 Cleaned sandbox workspace: ${removed} item(s) removed.\n_CLAUDE.md preserved._`);
+        return;
+      }
+
+      if (action === 'reset') {
+        if (!senderIsAdmin && !msg.fromMe) {
+          await botReply(msg, '🔒 Only admins can reset sandboxes.');
+          return;
+        }
+        sandbox.removeContainer(chatId);
+        await botReply(msg, '🐳 Sandbox container removed. A fresh one will be created on next message.');
+        return;
+      }
+
+      // Default: show status
+      const status = sandbox.getSandboxStatus(chatId);
+      let text = `🐳 *Sandbox Status*\n\n`;
+      text += `Container: \`${status.containerName}\`\n`;
+      text += `Status: ${status.status}\n`;
+      text += `Disk: ${status.diskUsageMB}MB / ${status.maxDiskMB}MB\n`;
+      if (status.diskUsageMB > status.maxDiskMB) {
+        text += `⚠️ *Over disk limit!* Use /sandbox clean\n`;
+      }
+      text += `\n_Commands: /sandbox clean, /sandbox reset_`;
+      await botReply(msg, text);
+      return;
+    }
+
+    // /subscribe <number> — add subscription (admin only)
+    const subscribeMatch = caption.match(/^\/subscribe\s+(\S+)/i);
+    if (subscribeMatch) {
+      if (!senderIsAdmin) {
+        await botReply(msg, '🔒 Only admins can manage subscriptions.');
+        return;
+      }
+      const num = subscribeMatch[1].includes('@') ? subscribeMatch[1] : `${subscribeMatch[1]}@c.us`;
+      addSubscription(num);
+      await botReply(msg, `✅ Subscription added for ${num.replace('@c.us', '')}`);
+      return;
+    }
+
+    // /unsubscribe <number> — remove subscription (admin only)
+    const unsubscribeMatch = caption.match(/^\/unsubscribe\s+(\S+)/i);
+    if (unsubscribeMatch) {
+      if (!senderIsAdmin) {
+        await botReply(msg, '🔒 Only admins can manage subscriptions.');
+        return;
+      }
+      const num = unsubscribeMatch[1].includes('@') ? unsubscribeMatch[1] : `${unsubscribeMatch[1]}@c.us`;
+      removeSubscription(num);
+      await botReply(msg, `⛔ Subscription removed for ${num.replace('@c.us', '')}`);
+      return;
+    }
+
+    // /subscribers — list subscribed users (admin only)
+    if (caption.toLowerCase() === '/subscribers') {
+      if (!senderIsAdmin) {
+        await botReply(msg, '🔒 Only admins can view subscribers.');
+        return;
+      }
+      const subs = getSubscribedUsers();
+      if (subs.length === 0) {
+        await botReply(msg, '📋 No subscribed users yet.\nUse `/subscribe <number>` to add one.');
+      } else {
+        const list = subs.map((s, i) => `${i + 1}. ${s.replace('@c.us', '')}`).join('\n');
+        await botReply(msg, `📋 *Subscribed users (${subs.length}):*\n\n${list}`);
+      }
+      return;
+    }
+
+    // /isolate — give this group its own Docker container
+    if (caption.toLowerCase() === '/isolate') {
+      if (!isGroup) {
+        await botReply(msg, '🐳 /isolate is only for group chats. Your DM already has its own sandbox.');
+        return;
+      }
+      if (isIsolatedGroup(chatId)) {
+        await botReply(msg, '🐳 This group is already isolated with its own sandbox.');
+        return;
+      }
+      setIsolatedGroup(chatId);
+      // Remove the old container (was keyed by senderId), fresh one will be created
+      if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
+        sandbox.removeContainer(chatId);
+      }
+      clearSession(chatId);
+      await botReply(msg, '🐳 Group isolated! This group now has its own separate sandbox.\nSession reset for fresh start.');
+      return;
+    }
+
+    // /unisolate — merge group back to user's personal Docker
+    if (caption.toLowerCase() === '/unisolate') {
+      if (!isGroup) {
+        await botReply(msg, '🐳 /unisolate is only for group chats.');
+        return;
+      }
+      if (!isIsolatedGroup(chatId)) {
+        await botReply(msg, '🐳 This group already shares your personal sandbox.');
+        return;
+      }
+      // Clean up the isolated container
+      if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
+        sandbox.removeContainer(chatId);
+      }
+      removeIsolatedGroup(chatId);
+      clearSession(chatId);
+      await botReply(msg, '🐳 Group merged back to your personal sandbox.\nSession reset for fresh start.');
       return;
     }
 
@@ -501,7 +688,13 @@ provider.on('message', async (msg) => {
 
     // /files — list files in the workspace (TASK-005)
     if (caption.toLowerCase() === '/files') {
-      const workspaceDir = getProjectDir(chatId) || process.env.HOME;
+      let workspaceDir;
+      if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
+        const sbStatus = sandbox.getSandboxStatus(chatId);
+        workspaceDir = sbStatus.workspaceDir;
+      } else {
+        workspaceDir = getProjectDir(chatId) || process.env.HOME;
+      }
 
       let entries = [];
       try {
@@ -790,7 +983,7 @@ provider.on('message', async (msg) => {
           logger.info(`Quick reply selected: ${idx + 1}. ${selectedOption}`);
           clearQuickReplies(chatId);
           clearPendingPoll(chatId);
-          await handlePrompt(msg, chatId, `I choose: ${selectedOption}`);
+          await handlePrompt(msg, chatId, `I choose: ${selectedOption}`, null, senderName, senderId);
           return;
         }
       }
@@ -835,7 +1028,7 @@ provider.on('message', async (msg) => {
     ensureProfile(senderId, senderName);
   }
 
-  await handlePrompt(msg, chatId, prompt, mediaPath, senderName);
+  await handlePrompt(msg, chatId, prompt, mediaPath, senderName, senderId);
 });
 
 // --- Internal HTTP API for external services (e.g. Shorty trading bot) ---
@@ -885,6 +1078,7 @@ process.on('unhandledRejection', (reason) => {
 // Graceful shutdown
 async function shutdown() {
   logger.info('Shutting down...');
+  sandbox.shutdown();
   apiServer.close();
   await provider.destroy();
   process.exit(0);

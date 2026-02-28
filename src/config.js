@@ -25,4 +25,12 @@ module.exports = {
   webhookPort: parseInt(process.env.WEBHOOK_PORT || '3000', 10),
   // Open access mode: when true, all DMs are allowed (standalone bot)
   openAccess: process.env.OPEN_ACCESS !== 'false',
+  // Docker sandbox settings
+  sandboxEnabled: process.env.SANDBOX_ENABLED !== 'false',
+  sandboxBaseDir: process.env.SANDBOX_BASE_DIR || '/media/ddarji/storage/ai-assistant/sandboxes',
+  sandboxMemory: process.env.SANDBOX_MEMORY || '512m',
+  sandboxCpus: process.env.SANDBOX_CPUS || '1',
+  sandboxPidsLimit: process.env.SANDBOX_PIDS_LIMIT || '256',
+  sandboxWorkspaceMaxMB: parseInt(process.env.SANDBOX_WORKSPACE_MAX_MB || '500', 10),
+  sandboxIdleTimeoutMs: parseInt(process.env.SANDBOX_IDLE_TIMEOUT_MS || '86400000', 10),
 };

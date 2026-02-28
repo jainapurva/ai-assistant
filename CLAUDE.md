@@ -9,6 +9,7 @@ src/
 ├── index.js       — Message routing, commands, polls, HTTP API
 ├── claude.js      — Claude CLI bridge, session/project/model management, state persistence
 ├── config.js      — Loads .env, exposes settings (model, open access, etc.)
+├── sandbox.js     — Per-user Docker sandbox (container lifecycle, disk monitoring, idle reaping)
 ├── scheduler.js   — Cron-based scheduled tasks with persistence
 ├── projects.js    — Scans for CLAUDE.md files, project discovery
 ├── formatter.js   — ANSI stripping, message chunking (4000 char limit)
@@ -65,6 +66,9 @@ src/
 | `/profile` | View profile |
 | `/usage` | Token usage stats |
 | `/files` | List & download workspace files |
+| `/sandbox` | Sandbox status & disk usage |
+| `/sandbox clean` | Clean sandbox workspace |
+| `/sandbox reset` | Remove sandbox container (admin) |
 | `/imagine <prompt>` | Generate image (DALL-E 3) |
 | `/drive` | List Drive files |
 | `/schedule` | Schedule recurring tasks |
@@ -74,6 +78,17 @@ src/
 ## Internal HTTP API
 - `POST /send` — `{ chatId, message }` → sends WhatsApp message
 - `GET /health` — returns `{ status: "ok" }`
+
+## Docker Sandbox
+Each user gets an isolated Docker container for Claude execution:
+- Container: `ai-sandbox-<sha256(chatId)[:12]>`
+- Image: `ai-assistant-sandbox:latest` (Ubuntu 22.04, minimal)
+- All persistent data via bind mounts (near-zero overlay writes)
+- Mounts: Claude binary (ro), workspace (rw), .claude dir (rw), credentials (ro)
+- Resource limits: 512MB RAM, 1 CPU, 256 PIDs, 64MB tmpfs /tmp
+- Disk monitoring every 5 min, idle reaping after 24h, startup prune
+- Host dirs: `/media/ddarji/storage/ai-assistant/sandboxes/<hash>/{workspace,.claude}`
+- Graceful fallback: if Docker unavailable, runs on host
 
 ## Key Decisions
 - Cloud API only — no whatsapp-web.js dependency

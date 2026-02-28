@@ -4,6 +4,7 @@ const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
 const { buildSafeEnv, filterSensitiveOutput, SECURITY_SYSTEM_PROMPT } = require('./security');
+const sandbox = require('./sandbox');
 
 // Persistent state file — survives bot restarts
 const STATE_FILE = path.join(config.stateDir, 'bot_state.json');
@@ -22,6 +23,18 @@ const activeProcesses = new Map();
 
 // Task history per chat (chatId -> array of last 5 completed tasks)
 const taskHistory = new Map();
+
+// Per-chat token usage counters (chatId -> { input, output, tasks })
+const tokenCounters = new Map();
+
+// Chats that have already received the welcome message
+const greetedChats = new Set();
+
+// Users with active subscriptions (phone numbers like "1234567890@c.us")
+const subscribedUsers = new Set();
+
+// Groups with their own isolated Docker container (keyed by chatId instead of senderId)
+const isolatedGroups = new Set();
 
 // --- Global concurrency limiter for Claude CLI processes ---
 // Claude CLI uses local state (~/.claude/) and concurrent processes can collide,
@@ -84,6 +97,21 @@ function loadState() {
           tokenCounters.set(chatId, counter);
         }
       }
+      if (data.greetedChats) {
+        for (const chatId of data.greetedChats) {
+          greetedChats.add(chatId);
+        }
+      }
+      if (data.subscribedUsers) {
+        for (const id of data.subscribedUsers) {
+          subscribedUsers.add(id);
+        }
+      }
+      if (data.isolatedGroups) {
+        for (const chatId of data.isolatedGroups) {
+          isolatedGroups.add(chatId);
+        }
+      }
     }
   } catch (e) {
     logger.warn('Failed to load state:', e.message);
@@ -98,6 +126,9 @@ function saveState() {
       sessions: Object.fromEntries(sessions),
       chatModels: Object.fromEntries(chatModels),
       tokenCounters: Object.fromEntries(tokenCounters),
+      greetedChats: [...greetedChats],
+      subscribedUsers: [...subscribedUsers],
+      isolatedGroups: [...isolatedGroups],
     };
     fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
   } catch (e) {
@@ -162,7 +193,7 @@ WORKING STYLE:
 ${SECURITY_SYSTEM_PROMPT}
 `;
 
-async function runClaude(prompt, chatId, _isRetry = false) {
+async function runClaude(prompt, chatId, sandboxKey, _isRetry = false) {
   // Wait for a concurrency slot before spawning
   await acquireClaudeSlot();
 
@@ -174,6 +205,8 @@ async function runClaude(prompt, chatId, _isRetry = false) {
     '--dangerously-skip-permissions',
     '--output-format', 'json',
   ];
+
+  const useSandbox = config.sandboxEnabled && sandbox.isDockerAvailable();
 
   let sessionId = null;
   if (config.enableSessions) {
@@ -195,12 +228,21 @@ async function runClaude(prompt, chatId, _isRetry = false) {
   const spawnEnv = buildSafeEnv();
 
   const cwd = getProjectDir(chatId) || process.env.HOME;
-  logger.info(`Spawning claude [${runningClaudeCount}/${MAX_CONCURRENT_CLAUDE}] in ${cwd}: ${args.slice(0, -1).join(' ')} "<prompt>"`);
-  const proc = spawn(config.claudePath, args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    cwd,
-    env: spawnEnv,
-  });
+  logger.info(`Spawning claude [${runningClaudeCount}/${MAX_CONCURRENT_CLAUDE}] in ${useSandbox ? 'sandbox' : cwd}: ${args.slice(0, -1).join(' ')} "<prompt>"`);
+
+  const sbKey = sandboxKey || chatId;
+  let proc;
+  if (useSandbox) {
+    try {
+      proc = await sandbox.spawnInContainer(sbKey, args, spawnEnv);
+      sandbox.markContainerUsed(sbKey);
+    } catch (err) {
+      logger.warn(`sandbox: fallback to host: ${err.message}`);
+      proc = spawn(config.claudePath, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd, env: spawnEnv });
+    }
+  } else {
+    proc = spawn(config.claudePath, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd, env: spawnEnv });
+  }
 
   return new Promise((resolve, reject) => {
     // Track active process so it can be killed by /stop
@@ -256,7 +298,7 @@ async function runClaude(prompt, chatId, _isRetry = false) {
         logger.warn(`Resume failed for ${chatId} (code ${code}): ${errorDetail.slice(0, 200)}`);
         clearSession(chatId);
         // Delay retry slightly to avoid racing with stale CLI state
-        setTimeout(() => resolve(runClaude(prompt, chatId, true)), 1000);
+        setTimeout(() => resolve(runClaude(prompt, chatId, sandboxKey, true)), 1000);
         return;
       }
 
@@ -364,8 +406,6 @@ function getTaskHistory(chatId) {
 
 // ── Token usage counters ────────────────────────────────────────────────────
 
-const tokenCounters = new Map();
-
 function addTokenUsage(chatId, tokens) {
   if (!tokens) return;
   const c = tokenCounters.get(chatId) || { input: 0, output: 0, tasks: 0 };
@@ -385,10 +425,74 @@ function resetTokenUsage(chatId) {
   saveState();
 }
 
+function isGreeted(chatId) {
+  return greetedChats.has(chatId);
+}
+
+function markGreeted(chatId) {
+  greetedChats.add(chatId);
+  saveState();
+}
+
+// ── Subscription management ──────────────────────────────────────────────────
+
+function isSubscribed(waId) {
+  return subscribedUsers.has(waId);
+}
+
+function addSubscription(waId) {
+  subscribedUsers.add(waId);
+  saveState();
+  logger.info(`Subscription added: ${waId}`);
+}
+
+function removeSubscription(waId) {
+  subscribedUsers.delete(waId);
+  saveState();
+  logger.info(`Subscription removed: ${waId}`);
+}
+
+function getSubscribedUsers() {
+  return [...subscribedUsers];
+}
+
+// ── Group isolation ─────────────────────────────────────────────────────────
+
+function isIsolatedGroup(chatId) {
+  return isolatedGroups.has(chatId);
+}
+
+function setIsolatedGroup(chatId) {
+  isolatedGroups.add(chatId);
+  saveState();
+}
+
+function removeIsolatedGroup(chatId) {
+  isolatedGroups.delete(chatId);
+  saveState();
+}
+
+/**
+ * Determine the sandbox key for a chat.
+ * - DMs: senderId (one Docker per user)
+ * - Groups (default): owner's senderId (same Docker as their DM)
+ * - Groups (isolated): chatId (group gets its own Docker)
+ */
+function getSandboxKey(chatId, senderId) {
+  if (isGroupChat(chatId) && isIsolatedGroup(chatId)) {
+    return chatId;
+  }
+  return senderId;
+}
+
 module.exports = {
   runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory,
   clearSession, setProjectDir, getProjectDir, clearProjectDir,
   setChatModel, getChatModel, clearChatModel,
   loadState, saveState, isGroupChat, STATE_FILE,
   getTokenUsage, resetTokenUsage,
+  isGreeted, markGreeted,
+  isSubscribed, addSubscription, removeSubscription, getSubscribedUsers,
+  isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup,
+  getSandboxKey,
 };
