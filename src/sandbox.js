@@ -18,6 +18,8 @@ try {
 
 // Host credentials path
 const CREDENTIALS_PATH = '/media/ddarji/storage/.claude/.credentials.json';
+// Host Claude CLI config file ($HOME/.claude.json)
+const CLAUDE_CONFIG_PATH = path.join(process.env.HOME || '/home/ddarji', '.claude.json');
 
 // Serialization: track containers being created to avoid races
 const creating = new Set();
@@ -137,6 +139,17 @@ async function ensureContainer(chatId) {
       '-v', `${claudeDir}:/home/claude/.claude`,
       // Read-only credential overlay
       '-v', `${CREDENTIALS_PATH}:/home/claude/.claude/.credentials.json:ro`,
+      // Node.js binary + MCP server bundle (for Google MCP integration)
+      '-v', `${config.nodeBinaryPath}:/usr/local/bin/node:ro`,
+      '-v', `${path.resolve(config.mcpServerPath)}:/opt/mcp/google-mcp-server.js:ro`,
+    ];
+
+    // Claude CLI config file (auth, settings) — mount if it exists on host
+    if (fs.existsSync(CLAUDE_CONFIG_PATH)) {
+      args.push('-v', `${CLAUDE_CONFIG_PATH}:/home/claude/.claude.json:ro`);
+    }
+
+    args.push(
       // Working directory
       '-w', '/workspace',
       // Resource limits
@@ -150,7 +163,7 @@ async function ensureContainer(chatId) {
       // Security
       '--security-opt', 'no-new-privileges',
       IMAGE_NAME,
-    ];
+    );
 
     execFileSync('docker', args, { stdio: 'ignore', timeout: 30000 });
     logger.info(`sandbox: created container ${containerName} for ${hashChatId(chatId)}`);

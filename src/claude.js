@@ -3,9 +3,9 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
-const { buildSafeEnv, filterSensitiveOutput, SECURITY_SYSTEM_PROMPT } = require('./security');
+const { buildSafeEnv, filterSensitiveOutput, sanitizePaths, SECURITY_SYSTEM_PROMPT } = require('./security');
 const sandbox = require('./sandbox');
-const gmail = require('./gmail');
+const googleAuth = require('./google-auth');
 
 // Persistent state file — survives bot restarts
 const STATE_FILE = path.join(config.stateDir, 'bot_state.json');
@@ -191,6 +191,13 @@ MEMORY & CONTINUITY:
 - When resuming work, always read CLAUDE.md first to understand where we left off.
 - Save reusable patterns, gotchas, and lessons learned so future sessions don't repeat mistakes.
 
+WEB SEARCH:
+- You have access to WebSearch and WebFetch tools. USE THEM.
+- When the user asks about current events, news, recent happenings, or ANYTHING beyond your knowledge cutoff — ALWAYS search the web first before responding.
+- NEVER say "my knowledge cuts off at..." without first attempting a web search.
+- For news, current events, stock prices, weather, sports scores, or any time-sensitive information — search first, then answer.
+- Use WebFetch to read specific URLs the user shares or that you find via search.
+
 WORKING STYLE:
 - Act autonomously. Don't ask for permission — just do the work.
 - Only ask before deleting/removing things.
@@ -227,38 +234,55 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false) {
     args.push('--resume', sessionId);
   }
 
-  // Build Gmail context if user has connected their account
-  let gmailPrompt = '';
-  if (gmail.isConfigured()) {
-    const gmailStatus = gmail.getStatus(chatId);
-    if (gmailStatus.connected) {
-      gmailPrompt = `
-GMAIL INTEGRATION:
-The user has connected their Gmail account (${gmailStatus.email}). You can send emails, search their inbox, and read emails on their behalf using the internal API.
+  // Build Google context — MCP tools when connected, short prompt when not
+  let googlePrompt = '';
+  let mcpConfig = null;
+  if (googleAuth.isConfigured()) {
+    const googleStatus = googleAuth.getStatus(chatId);
 
-API base: http://host.docker.internal:${config.httpPort}
-Chat ID for all requests: ${chatId}
+    if (googleStatus.connected) {
+      // Determine paths based on whether we're in a sandbox
+      const nodePath = useSandbox ? '/usr/local/bin/node' : config.nodeBinaryPath;
+      const mcpPath = useSandbox ? '/opt/mcp/google-mcp-server.js' : path.resolve(config.mcpServerPath);
+      const apiUrl = useSandbox ? `http://host.docker.internal:${config.httpPort}` : `http://localhost:${config.httpPort}`;
 
-To SEND an email:
-  curl -s -X POST http://host.docker.internal:${config.httpPort}/gmail/send -H 'Content-Type: application/json' -d '{"chatId":"${chatId}","to":"recipient@example.com","subject":"Subject here","body":"Email body here"}'
+      mcpConfig = {
+        mcpServers: {
+          google: {
+            command: nodePath,
+            args: [mcpPath],
+            env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
+          },
+        },
+      };
 
-To LIST/SEARCH inbox (returns JSON array of emails with id, from, to, subject, date, snippet):
-  curl -s -X POST http://host.docker.internal:${config.httpPort}/gmail/inbox -H 'Content-Type: application/json' -d '{"chatId":"${chatId}","query":"optional search query","maxResults":10}'
-
-To READ a specific email (returns full email with body):
-  curl -s -X POST http://host.docker.internal:${config.httpPort}/gmail/read -H 'Content-Type: application/json' -d '{"chatId":"${chatId}","messageId":"message_id_here"}'
-
-- When the user asks to send an email, compose it and send it directly. Don't ask for confirmation unless the request is ambiguous.
-- When the user asks about their emails, use the inbox/read endpoints.
-- The "query" field accepts Gmail search syntax (e.g. "from:user@example.com", "is:unread", "subject:invoice").
+      googlePrompt = `
+GOOGLE INTEGRATION: Connected as ${googleStatus.email}. You have MCP tools for Gmail, Drive, Sheets, and Docs — use them directly instead of curl.
+GUIDELINES:
+- When the user asks to send an email, compose and send directly. Don't ask for confirmation unless ambiguous.
+- Gmail "query" param accepts Gmail search syntax (e.g. "from:user@example.com", "is:unread", "subject:invoice").
+- Drive "query" param accepts Drive search syntax (e.g. "name contains 'report'", "mimeType='application/pdf'").
+- For Sheets, "range" uses A1 notation (e.g. "Sheet1!A1:D10"). "values" is a 2D array of strings.
+- NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual Gmail configuration. You already have a built-in integration — use it.
+`;
+    } else {
+      googlePrompt = `
+GOOGLE INTEGRATION (NOT YET CONNECTED):
+If the user asks about email, Gmail, Google Drive, Google Docs, or Google Sheets — tell them to type /gmail login to connect their Google account.
+NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual configuration. The built-in integration handles everything automatically.
 `;
     }
   }
 
-  // For new sessions, prepend the memory system prompt + gmail context
+  // Add MCP config when Google is connected (gives Claude native tools)
+  if (mcpConfig) {
+    args.push('--mcp-config', JSON.stringify(mcpConfig));
+  }
+
+  // For new sessions, prepend the memory system prompt + google context
   const fullPrompt = hasSession
-    ? (gmailPrompt ? gmailPrompt + prompt : prompt)
-    : MEMORY_SYSTEM_PROMPT + gmailPrompt + prompt;
+    ? (googlePrompt ? googlePrompt + prompt : prompt)
+    : MEMORY_SYSTEM_PROMPT + googlePrompt + prompt;
   args.push(fullPrompt);
 
   // Layer 2: whitelist-only env — strips all API keys, tokens, and secrets
@@ -399,7 +423,8 @@ To READ a specific email (returns full email with body):
         logger.warn(`Sensitive content redacted from Claude output (${chatId}): ${filtered.labels.join(', ')}`);
       }
 
-      resolve(filtered.text);
+      // Layer 4: strip server paths from output
+      resolve(sanitizePaths(filtered.text));
     });
 
     proc.on('error', (err) => {

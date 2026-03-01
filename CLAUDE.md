@@ -19,6 +19,8 @@ src/
 ├── drive.js       — Google Drive integration
 ├── profiles.js    — User profiles + registration
 ├── api-commands.js — /imagine, enable/disable per chat
+├── mcp/
+│   └── google-mcp-server.js — MCP stdio server proxying Google API calls
 └── providers/
     ├── base-provider.js      — Abstract EventEmitter provider interface
     ├── cloud-api-provider.js — Meta Cloud API (webhook + Graph API)
@@ -31,6 +33,15 @@ src/
 3. index.js routes message → commands or Claude CLI
 4. Claude spawned via `claude -p --model <model> --dangerously-skip-permissions`
 5. Response chunked to 4000 chars, sent back via Graph API
+
+## Google MCP Integration
+When a user has connected their Google account, Claude gets native MCP tools (`gmail_send`, `drive_list`, `sheets_read`, etc.) instead of curl templates in the system prompt. The MCP server (`src/mcp/google-mcp-server.js`) is a stdio proxy bundled into `dist/google-mcp-server.bundle.js` via esbuild. It's mounted read-only into Docker containers alongside the Node.js binary, and Claude invokes it via `--mcp-config`. Each tool proxies to the bot's existing HTTP API endpoints (`/gmail/send`, `/drive/list`, etc.).
+
+```
+Claude → MCP tool gmail_send → MCP server (stdio) → fetch() → host:5151/gmail/send → googleAuth → Google API
+```
+
+Build the bundle: `npm run build:mcp`
 
 ## State Management
 - Single local state file: `bot_state.json` (sessions, projects, models, token counters, schedules)
@@ -96,6 +107,16 @@ Each user gets an isolated Docker container for Claude execution:
 - `--dangerously-skip-permissions` — Claude runs fully autonomously
 - File-based state (not Redis/DB) — simple, no extra infra
 - Message queue instead of rejection — better UX for rapid messages
+
+## Validation Policy
+Before presenting code changes to the user, always:
+1. **Run tests** — `npm test` must pass with no failures
+2. **Build artifacts** — if you changed MCP server or bundled code, run `npm run build:mcp` and verify it succeeds
+3. **Smoke-test runtime** — for new executables/servers, verify they start without crashing (e.g. `timeout 3 node <file>` should exit 124, not error)
+4. **Docker mounts** — if you changed sandbox mounts, verify the file exists on host and runs inside a container (`docker run --rm -v ... ai-assistant-sandbox:latest <command>`)
+5. **Write tests** — new features and bug fixes should include unit tests in `tests/unit/`. Mock external dependencies (fetch, Docker, file system) rather than calling real services.
+
+If any check fails, fix the issue before reporting back. Never present untested code.
 
 ## Storage Policy
 - All data storage must be inside `/home/ddarji/dhruvil/storage/` or `/media/ddarji/storage/`

@@ -37,4 +37,7 @@ module.exports = {
   googleClientId: process.env.GOOGLE_CLIENT_ID || '',
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
   googleRedirectUri: process.env.GOOGLE_REDIRECT_URI || '',
+  // MCP server paths (for Google integration inside Docker sandboxes)
+  nodeBinaryPath: process.env.NODE_BINARY_PATH || '/home/ddarji/.nvm/versions/node/v20.20.0/bin/node',
+  mcpServerPath: process.env.MCP_SERVER_PATH || path.join(__dirname, '..', 'dist', 'google-mcp-server.bundle.js'),
 };
