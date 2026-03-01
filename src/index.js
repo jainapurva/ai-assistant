@@ -16,6 +16,37 @@ const scheduler = require('./scheduler');
 const logger = require('./logger');
 const chatLogger = require('./chat-logger');
 
+// ── Registration check against website DB ──────────────────────────────────
+const REGISTRATION_CHECK_URL = 'https://readwithme.ai/api/user/check';
+const SIGNUP_URL = 'https://readwithme.ai';
+const registrationCache = new Map(); // waId → { registered: boolean, checkedAt: number }
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+async function isRegistered(waId) {
+  // Admins always pass
+  if (isAdmin(waId)) return true;
+
+  // Check cache
+  const cached = registrationCache.get(waId);
+  if (cached && Date.now() - cached.checkedAt < CACHE_TTL) {
+    return cached.registered;
+  }
+
+  // waId format: "16262300167" → phone: "+16262300167"
+  const phone = '+' + waId.replace('@c.us', '');
+  try {
+    const res = await fetch(`${REGISTRATION_CHECK_URL}?phone=${encodeURIComponent(phone)}`);
+    const data = await res.json();
+    const registered = data.registered === true && data.status === 'active';
+    registrationCache.set(waId, { registered, checkedAt: Date.now() });
+    return registered;
+  } catch (err) {
+    logger.error(`Registration check failed for ${waId}: ${err.message}`);
+    // On error, allow through (don't block users due to API issues)
+    return true;
+  }
+}
+
 // Validate config: in non-open-access mode, whitelisted number is required
 if (!config.openAccess) {
   if (!config.whitelistedNumber || config.whitelistedNumber === '91XXXXXXXXXX@c.us') {
@@ -408,13 +439,29 @@ provider.on('message', async (msg) => {
     return;
   }
 
+  // Registration check: verify user signed up on the website
+  if (!isGroup && !msg.fromMe) {
+    const registered = await isRegistered(senderId);
+    if (!registered) {
+      logger.info(`Unregistered user ${senderId} — sending signup prompt`);
+      await botSendMessage(chatId,
+        `Hey there! 👋\n\n` +
+        `I'm your personal AI assistant — I help you tame the chaos. Marketing, emails, scheduling, research, coding — you name it, I'm on it.\n\n` +
+        `But first, I need you to sign up so I know who you are.\n\n` +
+        `👉 *Sign up here:* ${SIGNUP_URL}\n\n` +
+        `It takes 10 seconds. Once you're in, just come back and say hi — I'll be ready.`
+      );
+      return;
+    }
+  }
+
   // Welcome message for first-time users (one greeting per user, not per chat)
   if (!msg.fromMe && !isGreeted(senderId)) {
     markGreeted(senderId);
     await botSendMessage(chatId,
-      `Hey! I'm *Appy* 👋\n\n` +
-      `Think of me as your personal assistant who never sleeps and loves a good challenge.\n\n` +
-      `My job? Reduce the chaos around you. Whether it's answering questions, writing stuff, analyzing photos, or just brainstorming — I've got you.\n\n` +
+      `Hey! 👋\n\n` +
+      `I'm your personal AI assistant — think of me as a teammate who never sleeps and loves a good challenge.\n\n` +
+      `My job? Help you with your chaos. Whether it's answering questions, writing stuff, analyzing photos, managing emails, or just brainstorming — I've got you.\n\n` +
       `So, what's your first challenge? Let's go! 🚀`
     );
   }
