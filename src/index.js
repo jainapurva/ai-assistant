@@ -38,7 +38,10 @@ async function isRegistered(waId) {
     const res = await fetch(`${REGISTRATION_CHECK_URL}?phone=${encodeURIComponent(phone)}`);
     const data = await res.json();
     const registered = data.registered === true && data.status === 'active';
-    registrationCache.set(waId, { registered, checkedAt: Date.now() });
+    // Only cache positive results — never cache "not registered" so signup takes effect immediately
+    if (registered) {
+      registrationCache.set(waId, { registered, checkedAt: Date.now() });
+    }
     return registered;
   } catch (err) {
     logger.error(`Registration check failed for ${waId}: ${err.message}`);
