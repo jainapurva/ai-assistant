@@ -2,8 +2,10 @@
 
 import { useState, useCallback } from "react";
 import SuccessModal from "./SuccessModal";
+import { countryCodes } from "@/lib/country-codes";
 
 export default function SignupForm() {
+  const [countryDial, setCountryDial] = useState("+1");
   const [phone, setPhone] = useState("");
   const [promoCode, setPromoCode] = useState("");
   const [promoStatus, setPromoStatus] = useState<{
@@ -41,13 +43,11 @@ export default function SignupForm() {
     }
   }, []);
 
-  // Debounced promo validation
   const handlePromoChange = (value: string) => {
     setPromoCode(value);
     setPromoStatus({ checking: false });
 
     if (value.trim().length >= 3) {
-      // Simple debounce with timeout
       const timeout = setTimeout(() => validatePromo(value), 500);
       return () => clearTimeout(timeout);
     }
@@ -58,12 +58,15 @@ export default function SignupForm() {
     setError("");
     setSubmitting(true);
 
+    // Combine country code + phone number
+    const fullPhone = countryDial + phone.replace(/[\s\-().]/g, "");
+
     try {
       const res = await fetch("/api/signup", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          phone: phone.trim(),
+          phone: fullPhone,
           promoCode: promoCode.trim() || undefined,
         }),
       });
@@ -94,20 +97,33 @@ export default function SignupForm() {
         </p>
 
         <form onSubmit={handleSubmit} className="mt-10 space-y-5">
-          {/* Phone number */}
+          {/* Phone number with country code */}
           <div>
             <label htmlFor="phone" className="mb-1.5 block text-sm font-medium text-gray-300">
               WhatsApp phone number
             </label>
-            <input
-              id="phone"
-              type="tel"
-              placeholder="+1 (555) 123-4567"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              required
-              className="w-full rounded-xl border border-white/10 bg-surface-lighter px-4 py-3 text-white placeholder-gray-500 outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
-            />
+            <div className="flex gap-2">
+              <select
+                value={countryDial}
+                onChange={(e) => setCountryDial(e.target.value)}
+                className="w-[120px] shrink-0 rounded-xl border border-white/10 bg-surface-lighter px-3 py-3 text-white outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
+              >
+                {countryCodes.map((c) => (
+                  <option key={`${c.code}-${c.dial}`} value={c.dial}>
+                    {c.flag} {c.dial}
+                  </option>
+                ))}
+              </select>
+              <input
+                id="phone"
+                type="tel"
+                placeholder="555 123 4567"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                required
+                className="w-full rounded-xl border border-white/10 bg-surface-lighter px-4 py-3 text-white placeholder-gray-500 outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
+              />
+            </div>
           </div>
 
           {/* Promo code */}
