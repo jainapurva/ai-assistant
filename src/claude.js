@@ -283,7 +283,12 @@ NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual co
   const fullPrompt = hasSession
     ? (googlePrompt ? googlePrompt + prompt : prompt)
     : MEMORY_SYSTEM_PROMPT + googlePrompt + prompt;
-  args.push(fullPrompt);
+
+  // When --mcp-config is used, Claude CLI silently produces 0 bytes if the prompt
+  // is passed as a CLI arg. The workaround: pipe the prompt via shell
+  // (sh -c 'printf "%s" "PROMPT" | claude -p ...') inside the container.
+  const pipePrompt = !!mcpConfig;
+  args.push(pipePrompt ? '__PIPE_PROMPT__' : fullPrompt);
 
   // Layer 2: whitelist-only env — strips all API keys, tokens, and secrets
   const spawnEnv = buildSafeEnv();
@@ -295,7 +300,7 @@ NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual co
   let proc;
   if (useSandbox) {
     try {
-      proc = await sandbox.spawnInContainer(sbKey, args, spawnEnv);
+      proc = await sandbox.spawnInContainer(sbKey, args, spawnEnv, pipePrompt ? fullPrompt : null);
       sandbox.markContainerUsed(sbKey);
     } catch (err) {
       logger.warn(`sandbox: fallback to host: ${err.message}`);

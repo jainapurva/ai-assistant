@@ -1,80 +1,31 @@
+/**
+ * Google Drive integration — per-user OAuth via google-auth.js.
+ *
+ * Provides uploadFile and listFiles for the bot (file uploads, /drive command).
+ * All operations use the user's own Google account via OAuth.
+ */
+
 const fs = require('fs');
 const path = require('path');
 const { google } = require('googleapis');
-
 const logger = require('./logger');
+const googleAuth = require('./google-auth');
 
 const ROOT_FOLDER_NAME = 'WhatsApp Bot';
 
-// groupId → Drive folder ID cache (reset on restart)
+// waId+groupId → Drive folder ID cache (reset on restart)
 const folderIdCache = new Map();
 
-// Cached auth client and drive instance
-let _auth = null;
-let _drive = null;
-
-function getCredentialsPath() {
-  if (process.env.GOOGLE_CREDENTIALS_FILE) {
-    return process.env.GOOGLE_CREDENTIALS_FILE;
-  }
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-    return process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  }
-  const adc = path.join(
-    process.env.HOME || '/root',
-    '.config', 'gcloud', 'application_default_credentials.json'
-  );
-  if (fs.existsSync(adc)) {
-    return adc;
-  }
-  return null;
-}
-
 function isConfigured() {
-  return getCredentialsPath() !== null;
+  return googleAuth.isConfigured();
 }
 
-function getDriveClient() {
-  if (_drive) return _drive;
-
-  const credPath = getCredentialsPath();
-  if (!credPath) {
-    throw new Error('No Google credentials found. Set GOOGLE_CREDENTIALS_FILE or GOOGLE_APPLICATION_CREDENTIALS, or run gcloud auth application-default login.');
-  }
-
-  const scopes = ['https://www.googleapis.com/auth/drive.file'];
-
-  const keyFile = fs.readFileSync(credPath, 'utf8');
-  const parsed = JSON.parse(keyFile);
-
-  // Application Default Credentials (gcloud) use a different structure than service accounts
-  if (parsed.type === 'authorized_user') {
-    _auth = new google.auth.OAuth2();
-    _auth.setCredentials({
-      access_token: parsed.access_token,
-      refresh_token: parsed.refresh_token,
-      token_type: parsed.token_type,
-    });
-    // Attach client_id/secret so the client can auto-refresh
-    _auth._clientId = parsed.client_id;
-    _auth._clientSecret = parsed.client_secret;
-  } else {
-    _auth = new google.auth.GoogleAuth({
-      keyFile: credPath,
-      scopes,
-    });
-  }
-
-  _drive = google.drive({ version: 'v3', auth: _auth });
-  return _drive;
-}
-
-async function findOrCreateFolder(drive, name, parentId) {
+async function findOrCreateFolder(driveApi, name, parentId) {
   const q = parentId
     ? `name='${name}' and mimeType='application/vnd.google-apps.folder' and '${parentId}' in parents and trashed=false`
     : `name='${name}' and mimeType='application/vnd.google-apps.folder' and 'root' in parents and trashed=false`;
 
-  const res = await drive.files.list({
+  const res = await driveApi.files.list({
     q,
     fields: 'files(id, name)',
     pageSize: 1,
@@ -92,7 +43,7 @@ async function findOrCreateFolder(drive, name, parentId) {
     meta.parents = [parentId];
   }
 
-  const created = await drive.files.create({
+  const created = await driveApi.files.create({
     requestBody: meta,
     fields: 'id',
   });
@@ -100,38 +51,45 @@ async function findOrCreateFolder(drive, name, parentId) {
   return created.data.id;
 }
 
-async function getGroupFolderId(drive, groupId, groupName) {
-  if (folderIdCache.has(groupId)) {
-    return folderIdCache.get(groupId);
+async function getGroupFolderId(driveApi, waId, groupId, groupName) {
+  const cacheKey = `${waId}:${groupId}`;
+  if (folderIdCache.has(cacheKey)) {
+    return folderIdCache.get(cacheKey);
   }
 
-  const rootId = await findOrCreateFolder(drive, ROOT_FOLDER_NAME, null);
+  const rootId = await findOrCreateFolder(driveApi, ROOT_FOLDER_NAME, null);
   const label = groupName || groupId;
-  const groupFolderId = await findOrCreateFolder(drive, label, rootId);
+  const groupFolderId = await findOrCreateFolder(driveApi, label, rootId);
 
-  folderIdCache.set(groupId, groupFolderId);
+  folderIdCache.set(cacheKey, groupFolderId);
   return groupFolderId;
 }
 
-async function uploadFile(groupId, groupName, filePath) {
+/**
+ * Upload a file to the user's Drive under WhatsApp Bot/<group> folder.
+ * @param {string} waId - User's WhatsApp ID (for OAuth)
+ * @param {string} groupId - Chat/group ID (for folder organization)
+ * @param {string} groupName - Display name for the folder
+ * @param {string} filePath - Local file path
+ * @returns {string} Drive view link, or error string
+ */
+async function uploadFile(waId, groupId, groupName, filePath) {
   if (!isConfigured()) {
-    return 'Drive not configured: no Google credentials found.';
+    return 'Drive not configured: Google OAuth not set up.';
   }
 
-  let drive;
-  try {
-    drive = getDriveClient();
-  } catch (err) {
-    logger.error(`drive: auth error: ${err.message}`);
-    return `Drive auth error: ${err.message}`;
+  const client = googleAuth.createAuthenticatedClient(waId);
+  if (!client) {
+    return 'Drive not connected. Use /gmail login to connect your Google account.';
   }
 
   try {
-    const folderId = await getGroupFolderId(drive, groupId, groupName);
+    const driveApi = google.drive({ version: 'v3', auth: client });
+    const folderId = await getGroupFolderId(driveApi, waId, groupId, groupName);
     const fileName = path.basename(filePath);
     const fileStream = fs.createReadStream(filePath);
 
-    const res = await drive.files.create({
+    const res = await driveApi.files.create({
       requestBody: {
         name: fileName,
         parents: [folderId],
@@ -144,7 +102,7 @@ async function uploadFile(groupId, groupName, filePath) {
 
     const fileId = res.data.id;
 
-    await drive.permissions.create({
+    await driveApi.permissions.create({
       fileId,
       requestBody: {
         role: 'reader',
@@ -152,7 +110,7 @@ async function uploadFile(groupId, groupName, filePath) {
       },
     });
 
-    logger.info(`drive: uploaded "${fileName}" for group ${groupId} → ${fileId}`);
+    logger.info(`drive: uploaded "${fileName}" for ${waId} group ${groupId} → ${fileId}`);
     return `https://drive.google.com/file/d/${fileId}/view`;
   } catch (err) {
     logger.error(`drive: upload failed for ${filePath}: ${err.message}`);
@@ -160,25 +118,27 @@ async function uploadFile(groupId, groupName, filePath) {
   }
 }
 
-async function listFiles(groupId) {
+/**
+ * List files in the user's Drive folder for a group.
+ * @param {string} waId - User's WhatsApp ID (for OAuth)
+ * @param {string} groupId - Chat/group ID
+ * @returns {Array|string} Array of file objects, or error string
+ */
+async function listFiles(waId, groupId) {
   if (!isConfigured()) {
-    return 'Drive not configured: no Google credentials found.';
+    return 'Drive not configured: Google OAuth not set up.';
   }
 
-  let drive;
-  try {
-    drive = getDriveClient();
-  } catch (err) {
-    logger.error(`drive: auth error: ${err.message}`);
-    return `Drive auth error: ${err.message}`;
+  const client = googleAuth.createAuthenticatedClient(waId);
+  if (!client) {
+    return 'Drive not connected. Use /gmail login to connect your Google account.';
   }
 
   try {
-    // groupName not available here, but the cache may already have it.
-    // If not cached, fall back to groupId as folder label — folder may not exist yet.
-    const folderId = await getGroupFolderId(drive, groupId, groupId);
+    const driveApi = google.drive({ version: 'v3', auth: client });
+    const folderId = await getGroupFolderId(driveApi, waId, groupId, groupId);
 
-    const res = await drive.files.list({
+    const res = await driveApi.files.list({
       q: `'${folderId}' in parents and trashed=false`,
       fields: 'files(id, name, size, modifiedTime)',
       orderBy: 'modifiedTime desc',
@@ -192,7 +152,7 @@ async function listFiles(groupId) {
       modifiedTime: f.modifiedTime,
     }));
   } catch (err) {
-    logger.error(`drive: listFiles failed for group ${groupId}: ${err.message}`);
+    logger.error(`drive: listFiles failed for ${waId} group ${groupId}: ${err.message}`);
     return `Drive list error: ${err.message}`;
   }
 }

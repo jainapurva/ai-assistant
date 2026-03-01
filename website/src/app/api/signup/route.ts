@@ -3,6 +3,14 @@ import { normalizePhone } from "@/lib/phone";
 import { createUser } from "@/lib/db";
 import { BOT_PHONE_NUMBER } from "@/lib/constants";
 
+const BOT_API_URL = process.env.BOT_API_URL || "https://api.readwithme.ai";
+
+const WELCOME_MESSAGE =
+  `Hey! 👋\n\n` +
+  `I'm your personal AI assistant — think of me as a teammate who never sleeps and loves a good challenge.\n\n` +
+  `My job? Help you with your chaos. Whether it's answering questions, writing stuff, analyzing photos, managing emails, or just brainstorming — I've got you.\n\n` +
+  `So, what's your first challenge? Let's go! 🚀`;
+
 export async function POST(request: Request) {
   try {
     const { phone, promoCode } = await request.json();
@@ -33,6 +41,19 @@ export async function POST(request: Request) {
         { success: false, error: result.error },
         { status: 409 }
       );
+    }
+
+    // Send welcome message via bot's internal API
+    // Phone format: "+14243937267" → chatId: "14243937267"
+    const chatId = normalized.replace("+", "");
+    try {
+      await fetch(`${BOT_API_URL}/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chatId, message: WELCOME_MESSAGE }),
+      });
+    } catch {
+      // Don't fail signup if welcome message fails
     }
 
     const waLink = `https://wa.me/${BOT_PHONE_NUMBER}?text=Hi`;

@@ -1,4 +1,4 @@
-const { buildSafeEnv, filterSensitiveOutput, SECURITY_SYSTEM_PROMPT } = require('../../src/security');
+const { buildSafeEnv, filterSensitiveOutput, sanitizePaths, SECURITY_SYSTEM_PROMPT } = require('../../src/security');
 
 describe('buildSafeEnv', () => {
   test('always includes TERM=dumb', () => {
@@ -111,6 +111,53 @@ describe('filterSensitiveOutput', () => {
   test('does not false-positive on short strings', () => {
     const { redacted } = filterSensitiveOutput('The result is abc123 or key=short');
     expect(redacted).toBe(false);
+  });
+});
+
+describe('sanitizePaths', () => {
+  test('strips /media/ddarji/storage/ paths', () => {
+    const result = sanitizePaths('File at /media/ddarji/storage/git/ai-assistant/src/index.js');
+    expect(result).not.toContain('ddarji');
+    expect(result).not.toContain('/media/');
+    expect(result).toContain('git/ai-assistant/src/index.js');
+  });
+
+  test('strips /home/ddarji/ paths', () => {
+    const result = sanitizePaths('Config at /home/ddarji/.claude.json');
+    expect(result).not.toContain('ddarji');
+    expect(result).toContain('.claude.json');
+  });
+
+  test('strips /home/ddarji/dhruvil/storage/ paths', () => {
+    const result = sanitizePaths('Data in /home/ddarji/dhruvil/storage/projects/test');
+    expect(result).not.toContain('ddarji');
+    expect(result).not.toContain('dhruvil');
+  });
+
+  test('strips /home/claude/ paths (sandbox)', () => {
+    const result = sanitizePaths('Error at /home/claude/.claude.json');
+    expect(result).not.toContain('/home/claude/');
+  });
+
+  test('strips sandbox workspace paths', () => {
+    const result = sanitizePaths('File: /media/ddarji/storage/ai-assistant/sandboxes/b6fd21d8e043/workspace/output.txt');
+    expect(result).not.toContain('ddarji');
+    expect(result).not.toContain('sandboxes');
+    expect(result).not.toContain('b6fd21d8e043');
+  });
+
+  test('passes clean text unchanged', () => {
+    expect(sanitizePaths('Hello world')).toBe('Hello world');
+  });
+
+  test('handles null/undefined gracefully', () => {
+    expect(sanitizePaths(null)).toBeNull();
+    expect(sanitizePaths(undefined)).toBeUndefined();
+  });
+
+  test('strips multiple paths in same string', () => {
+    const result = sanitizePaths('From /home/ddarji/a.txt to /media/ddarji/storage/b.txt');
+    expect(result).not.toContain('ddarji');
   });
 });
 

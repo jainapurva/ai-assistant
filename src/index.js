@@ -7,7 +7,7 @@ const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearS
 const { ensureProfile, getProfile, registerUser, getAllProfiles, formatProfileCard } = require('./profiles');
 const apiCommands = require('./api-commands');
 const drive = require('./drive');
-const gmail = require('./gmail');
+const googleAuth = require('./google-auth');
 const { stripAnsi, chunkMessage } = require('./formatter');
 const { detectOptions } = require('./options');
 const { discoverProjects, getProjectSummary } = require('./projects');
@@ -15,6 +15,7 @@ const sandbox = require('./sandbox');
 const scheduler = require('./scheduler');
 const logger = require('./logger');
 const chatLogger = require('./chat-logger');
+const { sanitizePaths } = require('./security');
 
 // ── Registration check against website DB ──────────────────────────────────
 const REGISTRATION_CHECK_URL = 'https://readwithme.ai/api/user/check';
@@ -96,22 +97,22 @@ function clearPendingProjectPoll(chatId) { pendingProjectPolls.delete(chatId); }
 // --- Provider-agnostic send helpers ---
 
 async function botReply(msg, text) {
-  await provider.replyToMessage(msg, text);
+  await provider.replyToMessage(msg, sanitizePaths(text));
 }
 
 async function botSendChunks(msg, text) {
-  const chunks = chunkMessage(text, config.maxChunkSize);
+  const chunks = chunkMessage(sanitizePaths(text), config.maxChunkSize);
   for (const chunk of chunks) {
     await provider.replyToMessage(msg, chunk);
   }
 }
 
 async function botSendPoll(chatId, question, options) {
-  await provider.sendPoll(chatId, question, options);
+  await provider.sendPoll(chatId, question, options.map(o => sanitizePaths(o)));
 }
 
 async function botSendMessage(chatId, text) {
-  await provider.sendMessage(chatId, text);
+  await provider.sendMessage(chatId, sanitizePaths(text));
 }
 
 /**
@@ -333,9 +334,31 @@ function isBotGeneratedMessage(text) {
   return BOT_MESSAGE_PREFIXES.some(prefix => text.startsWith(prefix));
 }
 
-// --- Gmail OAuth callback (registered on public webhook server) ---
+// --- /send route on public webhook server (called by readwithme.ai signup) ---
+provider.addRoute('POST', '/send', (req, res) => {
+  let body = '';
+  req.on('data', chunk => body += chunk);
+  req.on('end', async () => {
+    try {
+      const { chatId, message } = JSON.parse(body);
+      if (!chatId || !message) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'chatId and message required' }));
+      }
+      await botSendMessage(chatId, message);
+      markGreeted(chatId);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'sent' }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  });
+});
 
-if (gmail.isConfigured()) {
+// --- Google OAuth callback (registered on public webhook server) ---
+
+if (googleAuth.isConfigured()) {
   provider.addRoute('GET', '/auth/google/callback', async (req, res) => {
     try {
       const url = new URL(req.url, `http://localhost:${config.webhookPort}`);
@@ -355,20 +378,20 @@ if (gmail.isConfigured()) {
         return;
       }
 
-      const result = await gmail.handleCallback(code, state);
+      const result = await googleAuth.handleCallback(code, state);
 
       res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(`<h2>Gmail connected!</h2><p>Signed in as <b>${result.email}</b>.</p><p>You can close this window and return to WhatsApp.</p>`);
+      res.end(`<h2>Google connected!</h2><p>Signed in as <b>${result.email}</b>.</p><p>Gmail, Drive, Docs & Sheets are now available.</p><p>You can close this window and return to WhatsApp.</p>`);
 
       // Notify user on WhatsApp
-      await botSendMessage(result.waId, `*Gmail connected!*\n\nSigned in as *${result.email}*.\n\nYou can now:\n\`/gmail send user@example.com Subject | Body\`\n\`/gmail inbox\` — view recent emails\n\`/gmail read <id>\` — read an email\n\`/gmail logout\` — disconnect`);
+      await botSendMessage(result.waId, `*Google connected!*\n\nSigned in as *${result.email}*.\n\nYou now have access to:\n• *Gmail* — /gmail send, inbox, read\n• *Drive* — /drive to list files\n• *Docs & Sheets* — via AI assistant\n\n\`/gmail logout\` to disconnect.`);
     } catch (e) {
-      logger.error('Gmail OAuth callback error:', e.message);
+      logger.error('Google OAuth callback error:', e.message);
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(`<h2>Authorization failed.</h2><p>${e.message}</p><p>Please try /gmail login again.</p>`);
     }
   });
-  logger.info('Gmail integration enabled');
+  logger.info('Google integration enabled (Gmail, Drive, Docs, Sheets)');
 }
 
 // --- Provider event handlers ---
@@ -838,22 +861,30 @@ provider.on('message', async (msg) => {
       return;
     }
 
-    // /drive — list files uploaded to this group's Google Drive folder (TASK-012)
+    // /drive — list files uploaded to this group's Google Drive folder
     if (caption.toLowerCase() === '/drive') {
       if (!drive.isConfigured()) {
-        await botReply(msg, '❌ Google Drive is not configured. Set GOOGLE_CREDENTIALS_FILE in .env.');
+        await botReply(msg, '❌ Google Drive is not configured. Set up Google OAuth in .env.');
+        return;
+      }
+      const driveSenderId = senderId || config.whitelistedNumber;
+      const driveStatus = googleAuth.getStatus(driveSenderId);
+      if (!driveStatus.connected) {
+        await botReply(msg, '❌ Google not connected. Use `/gmail login` to connect your Google account (includes Drive access).');
         return;
       }
       await botReply(msg, '🔍 Fetching Drive files...');
       try {
-        const files = await drive.listFiles(chatId);
-        if (files.length === 0) {
-          await botReply(msg, '📁 No files uploaded to Drive for this group yet.');
+        const files = await drive.listFiles(driveSenderId, chatId);
+        if (typeof files === 'string') {
+          await botReply(msg, `❌ ${files}`);
+        } else if (files.length === 0) {
+          await botReply(msg, '📁 No files uploaded to Drive for this chat yet.');
         } else {
           const lines = files.map(f =>
             `📄 *${f.name}*\n   ${f.size} · ${new Date(f.modifiedTime).toLocaleDateString()}\n   ${f.link}`
           ).join('\n\n');
-          await botSendChunks(msg, `📁 *Drive files for this group:*\n\n${lines}`);
+          await botSendChunks(msg, `📁 *Drive files:*\n\n${lines}`);
         }
       } catch (e) {
         await botReply(msg, `❌ Drive error: ${e.message}`);
@@ -864,8 +895,8 @@ provider.on('message', async (msg) => {
     // /gmail [status|login|logout|send|inbox|read] — Gmail integration
     const gmailMatch = caption.match(/^\/gmail(?:\s+(.*))?$/is);
     if (gmailMatch) {
-      if (!gmail.isConfigured()) {
-        await botReply(msg, '❌ Gmail is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI in .env.');
+      if (!googleAuth.isConfigured()) {
+        await botReply(msg, '❌ Google is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI in .env.');
         return;
       }
 
@@ -875,26 +906,26 @@ provider.on('message', async (msg) => {
 
       // /gmail or /gmail status
       if (!subcommand || subcommand === 'status') {
-        const status = gmail.getStatus(gmailSenderId);
+        const status = googleAuth.getStatus(gmailSenderId);
         if (status.connected) {
-          await botReply(msg, `*Gmail connected*\n\nSigned in as *${status.email}*\nConnected: ${new Date(status.connectedAt).toLocaleDateString()}\n\nCommands:\n\`/gmail send <to> <subject> | <body>\`\n\`/gmail inbox [query]\`\n\`/gmail read <id>\`\n\`/gmail logout\``);
+          await botReply(msg, `*Google connected*\n\nSigned in as *${status.email}*\nConnected: ${new Date(status.connectedAt).toLocaleDateString()}\n\nGmail commands:\n\`/gmail send <to> <subject> | <body>\`\n\`/gmail inbox [query]\`\n\`/gmail read <id>\`\n\`/gmail logout\`\n\nAlso available: /drive, Docs & Sheets via AI`);
         } else {
-          await botReply(msg, `*Gmail not connected*\n\nUse \`/gmail login\` to connect your Gmail account.`);
+          await botReply(msg, `*Google not connected*\n\nUse \`/gmail login\` to connect your Google account (Gmail, Drive, Docs, Sheets).`);
         }
         return;
       }
 
       // /gmail login
       if (subcommand === 'login') {
-        const authUrl = gmail.getAuthUrl(gmailSenderId);
-        await botReply(msg, `*Connect your Gmail*\n\nTap the link below to authorize:\n${authUrl}\n\n_Link expires in 10 minutes._`);
+        const authUrl = googleAuth.getAuthUrl(gmailSenderId);
+        await botReply(msg, `*Connect your Google account*\n\nTap the link below to authorize:\n${authUrl}\n\n_This grants access to Gmail, Drive, Docs & Sheets._\n_Link expires in 10 minutes._`);
         return;
       }
 
       // /gmail logout
       if (subcommand === 'logout') {
-        gmail.removeUserTokens(gmailSenderId);
-        await botReply(msg, 'Gmail disconnected. Your tokens have been removed.');
+        googleAuth.removeUserTokens(gmailSenderId);
+        await botReply(msg, 'Google disconnected. Your tokens have been removed.\n\nThis also disconnects Drive, Docs & Sheets access.');
         return;
       }
 
@@ -904,7 +935,7 @@ provider.on('message', async (msg) => {
         const [, to, subject, body] = sendMatch;
         await botReply(msg, 'Sending email...');
         try {
-          const result = await gmail.sendEmail(gmailSenderId, to.trim(), subject.trim(), body.trim());
+          const result = await googleAuth.sendEmail(gmailSenderId, to.trim(), subject.trim(), body.trim());
           await botReply(msg, `*Email sent!*\n\nFrom: ${result.from}\nTo: ${result.to}\nSubject: ${result.subject}`);
         } catch (e) {
           await botReply(msg, `❌ Failed to send email: ${e.message}`);
@@ -917,7 +948,7 @@ provider.on('message', async (msg) => {
         const query = rawArgs.replace(/^inbox\s*/i, '').trim() || null;
         await botReply(msg, 'Fetching emails...');
         try {
-          const emails = await gmail.listEmails(gmailSenderId, query, 10);
+          const emails = await googleAuth.listEmails(gmailSenderId, query, 10);
           if (emails.length === 0) {
             await botReply(msg, 'No emails found.');
           } else {
@@ -940,7 +971,7 @@ provider.on('message', async (msg) => {
           return;
         }
         try {
-          const email = await gmail.getEmail(gmailSenderId, messageId);
+          const email = await googleAuth.getEmail(gmailSenderId, messageId);
           const text = [
             `*${email.subject || '(no subject)'}*`,
             `From: ${email.from}`,
@@ -957,7 +988,7 @@ provider.on('message', async (msg) => {
       }
 
       // Unknown subcommand — show help
-      await botReply(msg, `*Gmail commands:*\n\n\`/gmail\` — Connection status\n\`/gmail login\` — Connect your Gmail\n\`/gmail logout\` — Disconnect Gmail\n\`/gmail send <to> <subject> | <body>\` — Send email\n\`/gmail inbox [query]\` — List/search emails\n\`/gmail read <id>\` — Read an email`);
+      await botReply(msg, `*Gmail commands:*\n\n\`/gmail\` — Connection status\n\`/gmail login\` — Connect Google account\n\`/gmail logout\` — Disconnect\n\`/gmail send <to> <subject> | <body>\` — Send email\n\`/gmail inbox [query]\` — List/search emails\n\`/gmail read <id>\` — Read an email`);
       return;
     }
 
@@ -1125,16 +1156,18 @@ provider.on('message', async (msg) => {
         const WA_MAX_BYTES = 16 * 1024 * 1024; // 16MB WhatsApp limit
 
         if (stat.size > WA_MAX_BYTES) {
-          if (drive.isConfigured()) {
+          const fileUploadSenderId = senderId || config.whitelistedNumber;
+          const driveConnected = googleAuth.getStatus(fileUploadSenderId).connected;
+          if (drive.isConfigured() && driveConnected) {
             await botReply(msg, `📤 File too large for WhatsApp (${(stat.size / 1048576).toFixed(1)}MB). Uploading to Drive...`);
             try {
-              const link = await drive.uploadFile(chatId, chatId, fullPath);
+              const link = await drive.uploadFile(fileUploadSenderId, chatId, chatId, fullPath);
               await botReply(msg, `✅ *${name}* uploaded to Drive:\n${link}`);
             } catch (e) {
               await botReply(msg, `❌ Drive upload failed: ${e.message}`);
             }
           } else {
-            await botReply(msg, `⚠️ File is ${(stat.size / 1048576).toFixed(1)}MB — too large for WhatsApp and Drive is not configured.`);
+            await botReply(msg, `⚠️ File is ${(stat.size / 1048576).toFixed(1)}MB — too large for WhatsApp. Use \`/gmail login\` to enable Drive uploads.`);
           }
         } else {
           await botReply(msg, `📤 Sending *${name}*...`);
@@ -1237,6 +1270,8 @@ const apiServer = http.createServer(async (req, res) => {
           return res.end(JSON.stringify({ error: 'chatId and message required' }));
         }
         await botSendMessage(chatId, message);
+        // Mark user as greeted so they don't get a duplicate welcome
+        markGreeted(chatId);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'sent' }));
       } catch (e) {
@@ -1254,7 +1289,7 @@ const apiServer = http.createServer(async (req, res) => {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ error: 'chatId, to, subject, and body required' }));
         }
-        const result = await gmail.sendEmail(chatId, to, subject, emailBody);
+        const result = await googleAuth.sendEmail(chatId, to, subject, emailBody);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'sent', ...result }));
       } catch (e) {
@@ -1272,7 +1307,7 @@ const apiServer = http.createServer(async (req, res) => {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ error: 'chatId required' }));
         }
-        const emails = await gmail.listEmails(chatId, query || null, maxResults || 10);
+        const emails = await googleAuth.listEmails(chatId, query || null, maxResults || 10);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ emails }));
       } catch (e) {
@@ -1290,9 +1325,156 @@ const apiServer = http.createServer(async (req, res) => {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ error: 'chatId and messageId required' }));
         }
-        const email = await gmail.getEmail(chatId, messageId);
+        const email = await googleAuth.getEmail(chatId, messageId);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ email }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  // ── Drive API endpoints ────────────────────────────────────────────────────
+  } else if (req.method === 'POST' && req.url === '/drive/list') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, query, maxResults } = JSON.parse(body);
+        if (!chatId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId required' }));
+        }
+        const files = await googleAuth.listDriveFiles(chatId, query || null, maxResults || 20);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ files }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/drive/upload') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, filePath, folderId } = JSON.parse(body);
+        if (!chatId || !filePath) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId and filePath required' }));
+        }
+        const result = await googleAuth.uploadToDrive(chatId, filePath, folderId || null);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'uploaded', ...result }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/drive/get') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, fileId } = JSON.parse(body);
+        if (!chatId || !fileId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId and fileId required' }));
+        }
+        const file = await googleAuth.getDriveFile(chatId, fileId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ file }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  // ── Sheets API endpoints ───────────────────────────────────────────────────
+  } else if (req.method === 'POST' && req.url === '/sheets/read') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, spreadsheetId, range } = JSON.parse(body);
+        if (!chatId || !spreadsheetId || !range) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, spreadsheetId, and range required' }));
+        }
+        const data = await googleAuth.readSheet(chatId, spreadsheetId, range);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(data));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/sheets/write') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, spreadsheetId, range, values } = JSON.parse(body);
+        if (!chatId || !spreadsheetId || !range || !values) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, spreadsheetId, range, and values required' }));
+        }
+        const result = await googleAuth.writeSheet(chatId, spreadsheetId, range, values);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'written', ...result }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/sheets/create') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, title } = JSON.parse(body);
+        if (!chatId || !title) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId and title required' }));
+        }
+        const sheet = await googleAuth.createSheet(chatId, title);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'created', ...sheet }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  // ── Docs API endpoints ─────────────────────────────────────────────────────
+  } else if (req.method === 'POST' && req.url === '/docs/read') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, documentId } = JSON.parse(body);
+        if (!chatId || !documentId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId and documentId required' }));
+        }
+        const doc = await googleAuth.readDoc(chatId, documentId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(doc));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/docs/create') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, title, body: docBody } = JSON.parse(body);
+        if (!chatId || !title) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId and title required' }));
+        }
+        const doc = await googleAuth.createDoc(chatId, title, docBody || '');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'created', ...doc }));
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));

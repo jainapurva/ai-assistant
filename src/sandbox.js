@@ -178,8 +178,10 @@ async function ensureContainer(chatId) {
 
 /**
  * Spawn a process inside the user's container. Returns a ChildProcess with stdout/stderr piped.
+ * @param {string|null} pipePrompt - If non-null, pipe this prompt via shell instead of passing as CLI arg.
+ *   This is needed because Claude CLI --mcp-config silently fails when prompt is a CLI arg.
  */
-async function spawnInContainer(chatId, args, env) {
+async function spawnInContainer(chatId, args, env, pipePrompt = null) {
   const containerName = await ensureContainer(chatId);
 
   // Build docker exec args with env vars
@@ -198,7 +200,17 @@ async function spawnInContainer(chatId, args, env) {
   dockerArgs.push('-e', 'HOME=/home/claude');
   dockerArgs.push('-e', 'USER=claude');
 
-  dockerArgs.push(containerName, 'claude', ...args);
+  if (pipePrompt) {
+    // Pipe prompt via shell: sh -c 'printf "%s" "PROMPT" | claude -p ...'
+    // Remove the placeholder prompt from args
+    const claudeArgs = args.filter(a => a !== '__PIPE_PROMPT__');
+    // Escape single quotes in prompt for shell safety
+    const escaped = pipePrompt.replace(/'/g, "'\\''");
+    const shellCmd = `printf '%s' '${escaped}' | claude ${claudeArgs.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ')}`;
+    dockerArgs.push(containerName, 'sh', '-c', shellCmd);
+  } else {
+    dockerArgs.push(containerName, 'claude', ...args);
+  }
 
   const proc = spawn('docker', dockerArgs, {
     stdio: ['ignore', 'pipe', 'pipe'],
