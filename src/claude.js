@@ -234,26 +234,40 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false) {
     args.push('--resume', sessionId);
   }
 
-  // Build Google context — MCP tools when connected, short prompt when not
+  // Build MCP config — Google (per-user OAuth) + Resend (global API key)
   let googlePrompt = '';
   let mcpConfig = null;
+
+  // Determine paths based on whether we're in a sandbox
+  const nodePath = useSandbox ? '/usr/local/bin/node' : config.nodeBinaryPath;
+  const apiUrl = useSandbox ? `http://host.docker.internal:${config.httpPort}` : `http://localhost:${config.httpPort}`;
+
+  // Resend MCP — always available when API key is configured
+  if (config.resendApiKey) {
+    const resendMcpPath = useSandbox ? '/opt/mcp/resend-mcp-server.mjs' : path.resolve(config.resendMcpPath);
+    mcpConfig = {
+      mcpServers: {
+        resend: {
+          command: nodePath,
+          args: [resendMcpPath],
+          env: { RESEND_API_KEY: config.resendApiKey },
+        },
+      },
+    };
+  }
+
+  // Google MCP — only when user has connected their Google account
   if (googleAuth.isConfigured()) {
     const googleStatus = googleAuth.getStatus(chatId);
 
     if (googleStatus.connected) {
-      // Determine paths based on whether we're in a sandbox
-      const nodePath = useSandbox ? '/usr/local/bin/node' : config.nodeBinaryPath;
       const mcpPath = useSandbox ? '/opt/mcp/google-mcp-server.js' : path.resolve(config.mcpServerPath);
-      const apiUrl = useSandbox ? `http://host.docker.internal:${config.httpPort}` : `http://localhost:${config.httpPort}`;
 
-      mcpConfig = {
-        mcpServers: {
-          google: {
-            command: nodePath,
-            args: [mcpPath],
-            env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
-          },
-        },
+      if (!mcpConfig) mcpConfig = { mcpServers: {} };
+      mcpConfig.mcpServers.google = {
+        command: nodePath,
+        args: [mcpPath],
+        env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
       };
 
       googlePrompt = `
@@ -279,10 +293,18 @@ NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual co
     args.push('--mcp-config', JSON.stringify(mcpConfig));
   }
 
-  // For new sessions, prepend the memory system prompt + google context
+  // Resend prompt — tell Claude about email tools when available
+  let resendPrompt = '';
+  if (config.resendApiKey) {
+    resendPrompt = `
+RESEND EMAIL: You have MCP tools from Resend for sending emails, managing contacts, domains, and more. Use the Resend tools (e.g. send_email) when the user asks to send emails via Resend.
+`;
+  }
+
+  // For new sessions, prepend the memory system prompt + integration context
   const fullPrompt = hasSession
-    ? (googlePrompt ? googlePrompt + prompt : prompt)
-    : MEMORY_SYSTEM_PROMPT + googlePrompt + prompt;
+    ? (resendPrompt + googlePrompt + prompt)
+    : MEMORY_SYSTEM_PROMPT + resendPrompt + googlePrompt + prompt;
 
   // When --mcp-config is used, Claude CLI silently produces 0 bytes if the prompt
   // is passed as a CLI arg. The workaround: pipe the prompt via shell

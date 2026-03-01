@@ -82,6 +82,8 @@ jest.mock('../../src/config', () => ({
   stateDir: '/tmp',
   nodeBinaryPath: '/usr/local/bin/node',
   mcpServerPath: '/opt/mcp/google-mcp-server.js',
+  resendApiKey: '',
+  resendMcpPath: '/opt/mcp/resend-mcp-server.mjs',
 }));
 
 // ── Mock fs ─────────────────────────────────────────────────────────────────
@@ -104,6 +106,7 @@ jest.mock('fs', () => {
 
 const { runClaude } = require('../../src/claude');
 const sandbox = require('../../src/sandbox');
+const mockConfig = require('../../src/config');
 
 // Helper: emit a successful close event on the mock proc
 function resolveProc(result = 'test response') {
@@ -214,5 +217,68 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     const { spawn } = require('child_process');
     expect(spawn).toHaveBeenCalled();
     expect(mockLastSpawnOpts.stdio[0]).toBe('ignore');
+  });
+
+  test('Resend MCP: added to mcpServers when API key is configured', async () => {
+    mockConfig.resendApiKey = 're_test_key_123';
+    mockGoogleAuth.isConfigured.mockReturnValue(false);
+
+    resolveProc();
+    await runClaude('send email', 'chat6', 'chat6');
+
+    const args = mockLastContainerArgs;
+
+    // --mcp-config should be present (Resend alone triggers MCP)
+    expect(args).toContain('--mcp-config');
+    const mcpIdx = args.indexOf('--mcp-config');
+    const mcpJson = JSON.parse(args[mcpIdx + 1]);
+
+    expect(mcpJson.mcpServers.resend).toBeDefined();
+    expect(mcpJson.mcpServers.resend.command).toBe('/usr/local/bin/node');
+    expect(mcpJson.mcpServers.resend.args[0]).toBe('/opt/mcp/resend-mcp-server.mjs');
+    expect(mcpJson.mcpServers.resend.env.RESEND_API_KEY).toBe('re_test_key_123');
+
+    // Google should NOT be present
+    expect(mcpJson.mcpServers.google).toBeUndefined();
+
+    // pipePrompt should be set (MCP active)
+    expect(mockLastContainerPipePrompt).toContain('send email');
+
+    // Reset
+    mockConfig.resendApiKey = '';
+  });
+
+  test('Resend + Google MCP: both present when both configured', async () => {
+    mockConfig.resendApiKey = 're_test_key_456';
+    mockGoogleAuth.isConfigured.mockReturnValue(true);
+    mockGoogleAuth.getStatus.mockReturnValue({ connected: true, email: 'u@g.com' });
+
+    resolveProc();
+    await runClaude('send email and check drive', 'chat7', 'chat7');
+
+    const args = mockLastContainerArgs;
+    const mcpJson = JSON.parse(args[args.indexOf('--mcp-config') + 1]);
+
+    // Both MCP servers present
+    expect(mcpJson.mcpServers.resend).toBeDefined();
+    expect(mcpJson.mcpServers.google).toBeDefined();
+    expect(mcpJson.mcpServers.resend.env.RESEND_API_KEY).toBe('re_test_key_456');
+    expect(mcpJson.mcpServers.google.env.CHAT_ID).toBe('chat7');
+
+    // Reset
+    mockConfig.resendApiKey = '';
+  });
+
+  test('no Resend key + no Google: no MCP, prompt as CLI arg', async () => {
+    mockConfig.resendApiKey = '';
+    mockGoogleAuth.isConfigured.mockReturnValue(false);
+
+    resolveProc();
+    await runClaude('hello', 'chat8', 'chat8');
+
+    const args = mockLastContainerArgs;
+    expect(args).not.toContain('--mcp-config');
+    expect(args[args.length - 1]).toContain('hello');
+    expect(mockLastContainerPipePrompt).toBeNull();
   });
 });

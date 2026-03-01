@@ -142,6 +142,7 @@ async function ensureContainer(chatId) {
       // Node.js binary + MCP server bundle (for Google MCP integration)
       '-v', `${config.nodeBinaryPath}:/usr/local/bin/node:ro`,
       '-v', `${path.resolve(config.mcpServerPath)}:/opt/mcp/google-mcp-server.js:ro`,
+      '-v', `${path.resolve(config.resendMcpPath)}:/opt/mcp/resend-mcp-server.mjs:ro`,
     ];
 
     // Claude CLI config file (auth, settings) — mount if it exists on host

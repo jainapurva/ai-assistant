@@ -7,13 +7,16 @@
     "start": "node src/index.js",
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
-    "build:mcp": "esbuild src/mcp/google-mcp-server.js --bundle --platform=node --target=node20 --format=cjs --outfile=dist/google-mcp-server.bundle.js"
+    "build:mcp": "npm run build:mcp:google && npm run build:mcp:resend",
+    "build:mcp:google": "esbuild src/mcp/google-mcp-server.js --bundle --platform=node --target=node20 --format=cjs --outfile=dist/google-mcp-server.bundle.js",
+    "build:mcp:resend": "esbuild node_modules/resend-mcp/dist/index.js --bundle --platform=node --target=node20 --format=esm --outfile=dist/resend-mcp-server.bundle.mjs --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "dotenv": "^16.4.0",
     "googleapis": "^171.4.0",
-    "node-cron": "^4.2.1"
+    "node-cron": "^4.2.1",
+    "resend-mcp": "^2.1.0"
   },
   "devDependencies": {
     "esbuild": "^0.25.0",

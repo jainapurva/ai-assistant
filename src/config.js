@@ -40,4 +40,7 @@ module.exports = {
   // MCP server paths (for Google integration inside Docker sandboxes)
   nodeBinaryPath: process.env.NODE_BINARY_PATH || '/home/ddarji/.nvm/versions/node/v20.20.0/bin/node',
   mcpServerPath: process.env.MCP_SERVER_PATH || path.join(__dirname, '..', 'dist', 'google-mcp-server.bundle.js'),
+  // Resend MCP (email via Resend API)
+  resendApiKey: process.env.RESEND_API_KEY || '',
+  resendMcpPath: process.env.RESEND_MCP_PATH || path.join(__dirname, '..', 'dist', 'resend-mcp-server.bundle.mjs'),
 };
