@@ -38,6 +38,10 @@ const subscribedUsers = new Set();
 // Groups with their own isolated Docker container (keyed by chatId instead of senderId)
 const isolatedGroups = new Set();
 
+// Task persistence for crash recovery
+const pendingTasks = new Map();    // chatId -> task descriptor (in-progress tasks)
+const persistedQueue = new Map();  // chatId -> [queue entries] (waiting messages)
+
 // --- Global concurrency limiter for Claude CLI processes ---
 // Claude CLI uses local state (~/.claude/) and concurrent processes can collide,
 // causing "exited with code 1" errors when multiple chats fire simultaneously.
@@ -114,6 +118,18 @@ function loadState() {
           isolatedGroups.add(chatId);
         }
       }
+      if (data.pendingTasks) {
+        for (const [chatId, task] of Object.entries(data.pendingTasks)) {
+          pendingTasks.set(chatId, task);
+        }
+        if (pendingTasks.size > 0) logger.info(`Restored ${pendingTasks.size} pending task(s) for recovery`);
+      }
+      if (data.persistedQueue) {
+        for (const [chatId, queue] of Object.entries(data.persistedQueue)) {
+          if (queue.length > 0) persistedQueue.set(chatId, queue);
+        }
+        if (persistedQueue.size > 0) logger.info(`Restored queued messages for ${persistedQueue.size} chat(s)`);
+      }
     }
   } catch (e) {
     logger.warn('Failed to load state:', e.message);
@@ -131,8 +147,13 @@ function saveState() {
       greetedChats: [...greetedChats],
       subscribedUsers: [...subscribedUsers],
       isolatedGroups: [...isolatedGroups],
+      pendingTasks: Object.fromEntries(pendingTasks),
+      persistedQueue: Object.fromEntries(persistedQueue),
     };
-    fs.writeFileSync(STATE_FILE, JSON.stringify(data, null, 2));
+    // Atomic write: write to temp file then rename (prevents corruption on crash)
+    const tmp = STATE_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+    fs.renameSync(tmp, STATE_FILE);
   } catch (e) {
     logger.warn('Failed to save state:', e.message);
   }
@@ -318,6 +339,14 @@ NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual co
     args.push('--mcp-config', JSON.stringify(mcpConfig));
   }
 
+  // Playwright prompt — tell Claude it has browser tools when active
+  let playwrightPrompt = '';
+  if (mcpConfig && mcpConfig.mcpServers && mcpConfig.mcpServers.playwright) {
+    playwrightPrompt = `
+BROWSER AUTOMATION: You have Playwright MCP tools available RIGHT NOW. Use them to take screenshots, navigate pages, click elements, fill forms, etc. Do NOT say you can't take screenshots — you CAN. Use the playwright tools.
+`;
+  }
+
   // Resend prompt — tell Claude about email tools when available
   let resendPrompt = '';
   if (resendApiKey) {
@@ -337,8 +366,8 @@ Do NOT attempt to use Resend tools — they are not available until the user con
 
   // For new sessions, prepend the memory system prompt + integration context
   const fullPrompt = hasSession
-    ? (resendPrompt + googlePrompt + prompt)
-    : MEMORY_SYSTEM_PROMPT + resendPrompt + googlePrompt + prompt;
+    ? (playwrightPrompt + resendPrompt + googlePrompt + prompt)
+    : MEMORY_SYSTEM_PROMPT + playwrightPrompt + resendPrompt + googlePrompt + prompt;
 
   // When --mcp-config is used, Claude CLI silently produces 0 bytes if the prompt
   // is passed as a CLI arg. The workaround: pipe the prompt via shell
@@ -632,6 +661,42 @@ function getSandboxKey(chatId, senderId) {
   return senderId;
 }
 
+// --- Task persistence for crash recovery ---
+
+function setPendingTask(chatId, task) {
+  pendingTasks.set(chatId, task);
+  saveState();
+}
+
+function clearPendingTask(chatId) {
+  if (!pendingTasks.has(chatId)) return;
+  pendingTasks.delete(chatId);
+  saveState();
+}
+
+function getPendingTasks() {
+  return new Map(pendingTasks);
+}
+
+function setPersistedQueue(chatId, queue) {
+  if (!queue || queue.length === 0) {
+    persistedQueue.delete(chatId);
+  } else {
+    persistedQueue.set(chatId, queue);
+  }
+  saveState();
+}
+
+function getPersistedQueue() {
+  return new Map(persistedQueue);
+}
+
+function clearPersistedQueue(chatId) {
+  if (!persistedQueue.has(chatId)) return;
+  persistedQueue.delete(chatId);
+  saveState();
+}
+
 module.exports = {
   runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory,
   clearSession, setProjectDir, getProjectDir, clearProjectDir,
@@ -642,4 +707,6 @@ module.exports = {
   isSubscribed, addSubscription, removeSubscription, getSubscribedUsers,
   isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup,
   getSandboxKey,
+  setPendingTask, clearPendingTask, getPendingTasks,
+  setPersistedQueue, getPersistedQueue, clearPersistedQueue,
 };

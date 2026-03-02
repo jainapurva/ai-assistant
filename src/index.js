@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const { createProvider } = require('./providers');
-const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearSession, setProjectDir, getProjectDir, clearProjectDir, setChatModel, getChatModel, clearChatModel, getTokenUsage, resetTokenUsage, isGreeted, markGreeted, isSubscribed, addSubscription, removeSubscription, getSubscribedUsers, isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup, getSandboxKey } = require('./claude');
+const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearSession, setProjectDir, getProjectDir, clearProjectDir, setChatModel, getChatModel, clearChatModel, getTokenUsage, resetTokenUsage, isGreeted, markGreeted, isSubscribed, addSubscription, removeSubscription, getSubscribedUsers, isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup, getSandboxKey, setPendingTask, clearPendingTask, getPendingTasks, setPersistedQueue, getPersistedQueue, clearPersistedQueue } = require('./claude');
 const { ensureProfile, getProfile, registerUser, getAllProfiles, formatProfileCard } = require('./profiles');
 const apiCommands = require('./api-commands');
 const drive = require('./drive');
@@ -164,10 +164,23 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
     if (!messageQueue.has(chatId)) messageQueue.set(chatId, []);
     const queue = messageQueue.get(chatId);
     queue.push({ msg, chatId, prompt, mediaPaths, senderName, senderId, opts });
+    // Persist queue for crash recovery (without msg objects which can't be serialized)
+    setPersistedQueue(chatId, queue.map(q => ({
+      chatId: q.chatId, prompt: q.prompt, mediaPaths: q.mediaPaths,
+      senderName: q.senderName, senderId: q.senderId, opts: q.opts,
+    })));
     await botReply(msg, `📋 Queued (#${queue.length} in line). I'll get to it after the current task.`);
     return;
   }
   processing.add(chatId);
+
+  // Persist task for crash recovery
+  setPendingTask(chatId, {
+    chatId, prompt, mediaPaths: mediaPaths || null,
+    senderName, senderId, opts,
+    startedAt: Date.now(),
+    retryCount: opts._retryCount || 0,
+  });
 
   // For group chats, prefix with sender name so Claude knows who's talking
   if (isGroup) {
@@ -332,6 +345,7 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
       }
     }
   } finally {
+    clearPendingTask(chatId);
     processing.delete(chatId);
     await provider.clearTyping(chatId);
     // Clean up media for this task
@@ -348,9 +362,21 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
 // Process the next item in the queue for a chat
 function processQueue(chatId) {
   const queue = messageQueue.get(chatId);
-  if (!queue || queue.length === 0) return;
+  if (!queue || queue.length === 0) {
+    clearPersistedQueue(chatId);
+    return;
+  }
   const next = queue.shift();
-  if (queue.length === 0) messageQueue.delete(chatId);
+  if (queue.length === 0) {
+    messageQueue.delete(chatId);
+    clearPersistedQueue(chatId);
+  } else {
+    // Update persisted queue with remaining items
+    setPersistedQueue(chatId, queue.map(q => ({
+      chatId: q.chatId, prompt: q.prompt, mediaPaths: q.mediaPaths,
+      senderName: q.senderName, senderId: q.senderId, opts: q.opts,
+    })));
+  }
   logger.info(`Dequeuing next message for ${chatId} (${queue ? queue.length : 0} remaining)`);
   // Fire and forget — handlePrompt manages its own lifecycle
   handlePrompt(next.msg, next.chatId, next.prompt, next.mediaPaths, next.senderName, next.senderId, next.opts);
@@ -488,6 +514,106 @@ if (googleAuth.isConfigured()) {
   logger.info('Google integration enabled (Gmail, Drive, Docs, Sheets)');
 }
 
+// --- Task recovery after restart ---
+
+const MAX_RETRY_COUNT = 2;
+const MAX_TASK_AGE_MS = 30 * 60 * 1000; // 30 minutes
+
+async function recoverInterruptedTasks() {
+  const tasks = getPendingTasks();
+  const queues = getPersistedQueue();
+
+  if (tasks.size === 0 && queues.size === 0) return;
+  logger.info(`Recovery: ${tasks.size} interrupted task(s), ${queues.size} chat(s) with queued messages`);
+
+  // Phase 1: Handle interrupted tasks
+  for (const [chatId, task] of tasks) {
+    const age = Date.now() - task.startedAt;
+
+    if (age > MAX_TASK_AGE_MS) {
+      // Too old — notify but don't retry
+      logger.warn(`Recovery: skipping stale task for ${chatId} (age: ${Math.round(age / 60000)}m)`);
+      clearPendingTask(chatId);
+      await botSendMessage(chatId,
+        `Hey! I had to restart and found a task from ${Math.round(age / 60000)} minutes ago that was interrupted. ` +
+        `It's too old to retry automatically. Here's what it was:\n\n` +
+        `_${task.prompt.slice(0, 200)}_\n\nJust send it again if you still need it.`
+      ).catch(() => {});
+      continue;
+    }
+
+    if ((task.retryCount || 0) >= MAX_RETRY_COUNT) {
+      // Max retries reached — notify and give up
+      logger.warn(`Recovery: max retries reached for ${chatId}`);
+      clearPendingTask(chatId);
+      await botSendMessage(chatId,
+        `I've restarted ${task.retryCount + 1} times while working on your task. ` +
+        `To avoid a loop, I won't retry automatically. Here's what it was:\n\n` +
+        `_${task.prompt.slice(0, 200)}_\n\nPlease send it again when you're ready.`
+      ).catch(() => {});
+      continue;
+    }
+
+    // Notify user and retry
+    await botSendMessage(chatId,
+      `I just restarted and your task was interrupted. Picking it back up now...`
+    ).catch(() => {});
+
+    // Small delay to let the system stabilize
+    await new Promise(r => setTimeout(r, 2000));
+
+    const syntheticMsg = { chatId, id: null };
+    handlePrompt(
+      syntheticMsg, chatId, task.prompt, task.mediaPaths,
+      task.senderName, task.senderId,
+      { ...task.opts, _retryCount: (task.retryCount || 0) + 1 }
+    );
+  }
+
+  // Phase 2: Restore queued messages
+  for (const [chatId, queue] of queues) {
+    if (!queue || queue.length === 0) {
+      clearPersistedQueue(chatId);
+      continue;
+    }
+
+    if (processing.has(chatId)) {
+      // A retry is already running for this chat — add to in-memory queue
+      for (const item of queue) {
+        if (!messageQueue.has(chatId)) messageQueue.set(chatId, []);
+        messageQueue.get(chatId).push({
+          msg: { chatId: item.chatId, id: null },
+          chatId: item.chatId, prompt: item.prompt, mediaPaths: item.mediaPaths,
+          senderName: item.senderName, senderId: item.senderId, opts: item.opts || {},
+        });
+      }
+    } else {
+      // No active task — process the first queued item
+      const first = queue.shift();
+      if (first) {
+        await botSendMessage(chatId,
+          `I just restarted. Processing your queued message now...`
+        ).catch(() => {});
+
+        handlePrompt(
+          { chatId: first.chatId, id: null }, chatId, first.prompt,
+          first.mediaPaths, first.senderName, first.senderId, first.opts || {}
+        );
+      }
+      // Push remaining items into in-memory queue
+      for (const item of queue) {
+        if (!messageQueue.has(chatId)) messageQueue.set(chatId, []);
+        messageQueue.get(chatId).push({
+          msg: { chatId: item.chatId, id: null },
+          chatId: item.chatId, prompt: item.prompt, mediaPaths: item.mediaPaths,
+          senderName: item.senderName, senderId: item.senderId, opts: item.opts || {},
+        });
+      }
+    }
+    clearPersistedQueue(chatId);
+  }
+}
+
 // --- Provider event handlers ---
 
 provider.on('ready', () => {
@@ -502,6 +628,9 @@ provider.on('ready', () => {
       setTimeout(() => botSentMessageIds.delete(sentId), 30000);
     }
   });
+
+  // Recover interrupted tasks from previous run
+  recoverInterruptedTasks();
 });
 
 provider.on('message', async (msg) => {
