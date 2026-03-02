@@ -208,7 +208,7 @@ WORKING STYLE:
 ${SECURITY_SYSTEM_PROMPT}
 `;
 
-async function runClaude(prompt, chatId, sandboxKey, _isRetry = false) {
+async function runClaude(prompt, chatId, sandboxKey, _isRetry = false, opts = {}) {
   // Wait for a concurrency slot before spawning
   await acquireClaudeSlot();
 
@@ -291,23 +291,27 @@ NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual co
     }
   }
 
-  // Playwright MCP — always enabled (browser automation for all users)
-  const playwrightMcpPath = useSandbox
-    ? '/opt/mcp/node_modules/@playwright/mcp/cli.js'
-    : path.resolve(config.playwrightMcpPath);
-  const playwrightBrowsersPath = useSandbox
-    ? '/opt/playwright-browsers'
-    : config.playwrightBrowsersPath;
+  // Playwright MCP — only for tasks that genuinely need interactive browser automation
+  // (NOT for general web search, fetching URLs, or reading websites — WebSearch/WebFetch handle those)
+  const NEEDS_BROWSER = /\b(take\s+a?\s*screenshot|screenshot\s+of|fill\s+(out\s+)?(the\s+)?form|submit\s+(the\s+)?form|log\s*in\s+to|sign\s*in\s+to|click\s+(the\s+|on\s+)?button|automate\s+(the\s+)?(website|page|site|browser)|browser\s+automation|interact\s+with\s+(the\s+)?(page|site|website))\b/i;
+  if (NEEDS_BROWSER.test(prompt) || opts.useBrowser) {
+    const playwrightMcpPath = useSandbox
+      ? '/opt/mcp/node_modules/@playwright/mcp/cli.js'
+      : path.resolve(config.playwrightMcpPath);
+    const playwrightBrowsersPath = useSandbox
+      ? '/opt/playwright-browsers'
+      : config.playwrightBrowsersPath;
 
-  if (!mcpConfig) mcpConfig = { mcpServers: {} };
-  mcpConfig.mcpServers.playwright = {
-    command: nodePath,
-    args: [playwrightMcpPath, '--headless'],
-    env: {
-      PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsersPath,
-      NODE_PATH: useSandbox ? '/opt/mcp/node_modules' : '',
-    },
-  };
+    if (!mcpConfig) mcpConfig = { mcpServers: {} };
+    mcpConfig.mcpServers.playwright = {
+      command: nodePath,
+      args: [playwrightMcpPath, '--headless'],
+      env: {
+        PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsersPath,
+        NODE_PATH: useSandbox ? '/opt/mcp/node_modules' : '',
+      },
+    };
+  }
 
   // Add MCP config (gives Claude native tools)
   if (mcpConfig) {

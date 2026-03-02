@@ -156,14 +156,14 @@ async function sendClaudeResponse(msg, chatId, responseText) {
 /**
  * Main handler: process a prompt and send to Claude
  */
-async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderId) {
+async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderId, opts = {}) {
   const isGroup = chatId.endsWith('@g.us');
 
   if (processing.has(chatId)) {
     // Queue the message instead of rejecting
     if (!messageQueue.has(chatId)) messageQueue.set(chatId, []);
     const queue = messageQueue.get(chatId);
-    queue.push({ msg, chatId, prompt, mediaPaths, senderName, senderId });
+    queue.push({ msg, chatId, prompt, mediaPaths, senderName, senderId, opts });
     await botReply(msg, `📋 Queued (#${queue.length} in line). I'll get to it after the current task.`);
     return;
   }
@@ -191,39 +191,78 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
     } catch (e) {}
   }, WORKING_DELAY_MS);
 
+  // Periodic progress pings — every 60s with random funny messages
+  const PROGRESS_INTERVAL_MS = 60000;
+  let progressCount = 0;
+  const PROGRESS_MSGS = [
+    'Still cooking... the recipe said 30 seconds but I think the oven lied 🍳',
+    'Bribing the servers with compliments... "you\'re doing great sweetie" 💅',
+    'My hamster is running as fast as he can on the wheel 🐹',
+    'Currently arguing with the code... I\'m winning 🥊',
+    'Making coffee while I wait for my brain to load ☕',
+    'Plot twist: the task was the friends we made along the way 🎬',
+    'Teaching a robot to think is harder than it looks 🤖',
+    'Still here! Just had to refuel the AI juice 🧃',
+    'If I had a dollar for every millisecond this is taking... 💰',
+    'Running calculations... carry the 1... carry the 2... carry the fridge 🧮',
+    'Asking the universe for answers... universe said "new phone who dis" 🌌',
+    'Currently in a meeting with my neurons. They can\'t agree 🧠',
+    'Almost there! Said every GPS ever... 🗺️',
+    'Downloading more RAM... just kidding, I wish 💾',
+    'I\'m not slow, I\'m just building suspense 🎭',
+    'Training my pet algorithm. It\'s not house-trained yet 🐕',
+    'Thinking so hard my circuits are getting a six-pack 💪',
+    'Hold on, let me put on my thinking cap... ok it\'s on backwards 🧢',
+    'Currently speedrunning this task... badly 🏃',
+    'My code is compiling and my patience is decompiling ⏳',
+  ];
+  const usedMsgs = new Set();
+  const progressTimer = setInterval(async () => {
+    try {
+      // Pick a random unused message
+      let available = PROGRESS_MSGS.filter((_, i) => !usedMsgs.has(i));
+      if (available.length === 0) { usedMsgs.clear(); available = PROGRESS_MSGS; }
+      const idx = PROGRESS_MSGS.indexOf(available[Math.floor(Math.random() * available.length)]);
+      usedMsgs.add(idx);
+      const elapsed = Math.round((progressCount + 1) * PROGRESS_INTERVAL_MS / 60000);
+      await botReply(msg, `${PROGRESS_MSGS[idx]} (${elapsed} min)`);
+      progressCount++;
+    } catch {}
+  }, PROGRESS_INTERVAL_MS);
+
   try {
     const sbKey = getSandboxKey(chatId, senderId || config.whitelistedNumber);
 
     // Snapshot workspace files before Claude runs (for detecting new output files)
-    // Use the per-user sandbox workspace so each user's files are isolated
-    let workspaceDir;
-    if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
-      workspaceDir = path.join(sandbox.getSandboxDir(sbKey), 'workspace');
-    } else {
-      workspaceDir = getProjectDir(chatId) || process.env.HOME;
-    }
+    // Only enabled when sandbox is active — never scan host filesystem
+    const useSandbox = config.sandboxEnabled && sandbox.isDockerAvailable();
+    let workspaceDir = null;
     let filesBefore = new Map(); // filename -> mtime
-    try {
-      for (const f of fs.readdirSync(workspaceDir)) {
-        try {
-          const stat = fs.statSync(path.join(workspaceDir, f));
-          if (stat.isFile()) filesBefore.set(f, stat.mtimeMs);
-        } catch {}
-      }
-    } catch {}
+    if (useSandbox) {
+      workspaceDir = path.join(sandbox.getSandboxDir(sbKey), 'workspace');
+      try {
+        for (const f of fs.readdirSync(workspaceDir)) {
+          try {
+            const stat = fs.statSync(path.join(workspaceDir, f));
+            if (stat.isFile()) filesBefore.set(f, stat.mtimeMs);
+          } catch {}
+        }
+      } catch {}
+    }
 
-    const rawResponse = await runClaude(prompt, chatId, sbKey);
+    const rawResponse = await runClaude(prompt, chatId, sbKey, false, { useBrowser: !!opts.useBrowser });
     clearTimeout(workingTimer);
+    clearInterval(progressTimer);
     const cleaned = stripAnsi(rawResponse).trim();
 
-    // Detect new files Claude created and send them to the user
+    // Detect new files Claude created and send them to the user (sandbox-only)
     // < 10MB → send via WhatsApp directly
     // >= 10MB → upload to Google Drive (if connected), else warn
     const SENDABLE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.pdf', '.mp4', '.mp3', '.ogg', '.csv', '.xlsx', '.docx', '.pptx', '.zip', '.txt', '.html', '.json', '.svg']);
     const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
     const DRIVE_THRESHOLD_BYTES = 10 * 1024 * 1024; // 10MB — above this, upload to Drive
 
-    try {
+    if (useSandbox && workspaceDir) try {
       const filesAfter = fs.readdirSync(workspaceDir);
       const fileSenderId = senderId || config.whitelistedNumber;
       const driveConnected = drive.isConfigured() && googleAuth.isConfigured() && googleAuth.getStatus(fileSenderId).connected;
@@ -281,6 +320,7 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
     logger.info(`Response sent (${cleaned.length} chars)`);
   } catch (err) {
     clearTimeout(workingTimer);
+    clearInterval(progressTimer);
     if (err.message === 'STOPPED_BY_USER') {
       logger.info(`Task stopped by user for chat ${chatId}`);
       chatLogger.logError(logSenderId, chatId, 'Stopped by user');
@@ -313,7 +353,7 @@ function processQueue(chatId) {
   if (queue.length === 0) messageQueue.delete(chatId);
   logger.info(`Dequeuing next message for ${chatId} (${queue ? queue.length : 0} remaining)`);
   // Fire and forget — handlePrompt manages its own lifecycle
-  handlePrompt(next.msg, next.chatId, next.prompt, next.mediaPaths, next.senderName, next.senderId);
+  handlePrompt(next.msg, next.chatId, next.prompt, next.mediaPaths, next.senderName, next.senderId, next.opts);
 }
 
 function getQueueLength(chatId) {
@@ -323,65 +363,34 @@ function getQueueLength(chatId) {
 
 const HELP_TEXT = `*Claude Code Bot* 🤖
 
-Just send any message and Claude will execute it autonomously on your PC.
+Just send any message and I'll handle it for you.
 
-*Supported inputs:*
-📝 Text — any instruction or question
-🖼️ Images — send one or multiple photos
-📄 Documents — PDFs, Word, Excel, and more
-🎵 Audio — voice messages and audio files
-🎬 Video — video files
-🗳️ Polls — when Claude gives options, tap to choose!
+*What can I do?*
+📝 Answer questions & write content
+🖼️ Analyze images — send one or multiple
+📄 Read documents — PDFs, Word, Excel, and more
+🎵 Transcribe audio & voice messages
+🎬 Analyze videos
+📧 Send emails (once connected)
+💻 Write & run code in your own sandbox
 
-_Files Claude creates are automatically sent back to you!_
-
-*Multiple sessions:*
-Create WhatsApp groups with "Claude" in the name!
-• "Claude - Website" → one session
-• "Claude - Videos" → another session
-Each group has its own conversation + project.
-
-*Project directories:*
-/project ~/news-swarm-project → set working dir
-/projects → see current project
-Claude loads CLAUDE.md, skills & commands from the project dir.
+_Files I create are automatically sent back to you!_
 
 *Commands:*
+/files - See & download files from your workspace
+/gmail - Connect Gmail & Google Drive
+/resend - Set up email sending via Resend
+/drive - List files uploaded to Google Drive
+/sandbox - Check your workspace status
+/sandbox clean - Clean sandbox workspace
+/usage - See your token usage
 /register <name> [email] - Create your user profile
 /profile - View your profile & usage stats
-/usage - Token usage for this chat
-/files - List & download files from your workspace
-/imagine <prompt> - Generate an image (DALL-E 3)
-/drive - List files uploaded to Google Drive
-/gmail - Gmail status, login, send, inbox, read
-/resend - Resend email setup, status, disconnect
-/sandbox - View sandbox status & disk usage
-/sandbox clean - Clean sandbox workspace
-/isolate - Give this group its own sandbox (separate from your DM)
-/stop - ⛔ Stop current task
-/stop all - ⛔ Stop + clear queue
-/reset - Clear session, project & queue
-/status - Bot status
-/help - Show this message
+/stop - Stop a running task
+/reset - Start fresh (clears session)
+/status - Check bot status
+/help - Show this message`;
 
-*Admin commands:*
-/claude-projects - Browse & open any project
-/project <path> - Set project directory
-/model <name> - Set model (opus/sonnet/haiku)
-/schedule every 30m <prompt> - Schedule task
-/schedules - List scheduled tasks
-/unschedule <id|all> - Remove scheduled task(s)
-/subscribe <number> - Add subscription for a user
-/unsubscribe <number> - Remove subscription
-/subscribers - List all subscribed users
-/enable <command> - Enable an API command for this chat
-/disable <command> - Disable an API command for this chat
-/profile <number> - View any user's profile
-
-*Quick replies:*
-Numbered options → tap the poll or reply with 1, 2, 3...
-
-Claude has *full permissions* — it does everything independently.`;
 
 // Returns true if the given WA ID is a configured admin
 function isAdmin(waId) {
@@ -570,7 +579,23 @@ provider.on('message', async (msg) => {
     await botSendMessage(chatId,
       `Hey! 👋\n\n` +
       `I'm your personal AI assistant — think of me as a teammate who never sleeps and loves a good challenge.\n\n` +
-      `My job? Help you with your chaos. Whether it's answering questions, writing stuff, analyzing photos, managing emails, or just brainstorming — I've got you.\n\n` +
+      `*What can I do?*\n` +
+      `📝 Answer questions & write content\n` +
+      `🖼️ Analyze images — send one or multiple\n` +
+      `📄 Read documents — PDFs, Word, Excel\n` +
+      `🎵 Transcribe audio & voice messages\n` +
+      `🎬 Analyze videos\n` +
+      `📧 Send emails (once connected)\n` +
+      `💻 Write & run code in your own sandbox\n\n` +
+      `*Handy commands:*\n` +
+      `/files — See & download files from your workspace\n` +
+      `/gmail login — Connect your Gmail & Google Drive\n` +
+      `/resend — Set up email sending via Resend\n` +
+      `/sandbox — Check your workspace status\n` +
+      `/usage — See your token usage\n` +
+      `/stop — Cancel a running task\n` +
+      `/reset — Start fresh (clears session)\n` +
+      `/help — Full command list\n\n` +
       `So, what's your first challenge? Let's go! 🚀`
     );
   }
@@ -631,7 +656,6 @@ provider.on('message', async (msg) => {
       return;
     }
     if (caption.toLowerCase() === '/status') {
-      const projDir = getProjectDir(chatId) || '(none — using home dir)';
       const currentModel = getChatModel(chatId) || config.claudeModel;
       const running = getRunningInfo(chatId);
       const qLen = getQueueLength(chatId);
@@ -644,9 +668,14 @@ provider.on('message', async (msg) => {
         const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
         statusText += `🔄 *Task running* (${timeStr})\n📝 _${running.prompt}_\n`;
         if (qLen > 0) statusText += `📋 *Queue:* ${qLen} message(s) waiting\n`;
-        statusText += `\nModel: ${currentModel}\nProject: ${projDir}\n\nSend /stop to interrupt.`;
+        statusText += `\nModel: ${currentModel}\n\nSend /stop to interrupt.`;
       } else {
-        statusText += `✅ *Idle — no task running*\nModel: ${currentModel}\nProject: ${projDir}`;
+        statusText += `✅ *Idle — no task running*\nModel: ${currentModel}`;
+      }
+      // Only show project path to admins
+      if (senderIsAdmin) {
+        const projDir = getProjectDir(chatId) || '(none — using home dir)';
+        statusText += `\nProject: ${projDir}`;
       }
 
       // Show sandbox info if enabled
@@ -886,15 +915,14 @@ provider.on('message', async (msg) => {
       return;
     }
 
-    // /files — list files in the workspace (TASK-005)
+    // /files — list files in the workspace (sandbox-only for security)
     if (caption.toLowerCase() === '/files') {
-      let workspaceDir;
-      if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
-        const sbStatus = sandbox.getSandboxStatus(chatId);
-        workspaceDir = sbStatus.workspaceDir;
-      } else {
-        workspaceDir = getProjectDir(chatId) || process.env.HOME;
+      if (!config.sandboxEnabled || !sandbox.isDockerAvailable()) {
+        await botReply(msg, '📂 Your session is not active yet. Send me a message first and I\'ll set up your workspace.');
+        return;
       }
+      const sbStatus = sandbox.getSandboxStatus(chatId);
+      const workspaceDir = sbStatus.workspaceDir;
 
       let entries = [];
       try {
@@ -1220,11 +1248,11 @@ provider.on('message', async (msg) => {
       return;
     }
 
-    // /project <path> — set working directory for this chat (admin-only in groups)
+    // /project <path> — set working directory for this chat (admin-only)
     const projectMatch = caption.match(/^\/project\s+(.+)/i);
     if (projectMatch) {
-      if (isGroup && !senderIsAdmin) {
-        await botReply(msg, '🔒 Only admins can change the group project.');
+      if (!senderIsAdmin) {
+        await botReply(msg, '🔒 This command is admin-only.');
         return;
       }
       const home = process.env.HOME || '/home/ddarji';
@@ -1239,10 +1267,10 @@ provider.on('message', async (msg) => {
       return;
     }
 
-    // /claude-projects or /projects — discover and list all Claude projects as a poll (admin-only in groups)
+    // /claude-projects or /projects — discover and list all Claude projects (admin-only)
     if (caption.toLowerCase() === '/claude-projects' || caption.toLowerCase() === '/projects') {
-      if (isGroup && !senderIsAdmin) {
-        await botReply(msg, '🔒 Only admins can browse projects in a group.');
+      if (!senderIsAdmin) {
+        await botReply(msg, '🔒 This command is admin-only.');
         return;
       }
       const projects = discoverProjects();
