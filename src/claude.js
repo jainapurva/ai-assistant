@@ -6,6 +6,7 @@ const logger = require('./logger');
 const { buildSafeEnv, filterSensitiveOutput, sanitizePaths, SECURITY_SYSTEM_PROMPT } = require('./security');
 const sandbox = require('./sandbox');
 const googleAuth = require('./google-auth');
+const resendAuth = require('./resend-auth');
 
 // Persistent state file — survives bot restarts
 const STATE_FILE = path.join(config.stateDir, 'bot_state.json');
@@ -234,7 +235,7 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false) {
     args.push('--resume', sessionId);
   }
 
-  // Build MCP config — Google (per-user OAuth) + Resend (global API key)
+  // Build MCP config — Google (per-user OAuth) + Resend (per-user API key)
   let googlePrompt = '';
   let mcpConfig = null;
 
@@ -242,15 +243,16 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false) {
   const nodePath = useSandbox ? '/usr/local/bin/node' : config.nodeBinaryPath;
   const apiUrl = useSandbox ? `http://host.docker.internal:${config.httpPort}` : `http://localhost:${config.httpPort}`;
 
-  // Resend MCP — always available when API key is configured
-  if (config.resendApiKey) {
+  // Resend MCP — per-user API key
+  const resendApiKey = resendAuth.resolveApiKey(chatId);
+  if (resendApiKey) {
     const resendMcpPath = useSandbox ? '/opt/mcp/resend-mcp-server.mjs' : path.resolve(config.resendMcpPath);
     mcpConfig = {
       mcpServers: {
         resend: {
           command: nodePath,
           args: [resendMcpPath],
-          env: { RESEND_API_KEY: config.resendApiKey },
+          env: { RESEND_API_KEY: resendApiKey },
         },
       },
     };
@@ -278,6 +280,7 @@ GUIDELINES:
 - Drive "query" param accepts Drive search syntax (e.g. "name contains 'report'", "mimeType='application/pdf'").
 - For Sheets, "range" uses A1 notation (e.g. "Sheet1!A1:D10"). "values" is a 2D array of strings.
 - NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual Gmail configuration. You already have a built-in integration — use it.
+FILE OUTPUT: When asked to create documents, reports, PDFs, images, or any files — ALWAYS save them locally in the current working directory (NOT to Google Drive). The bot will automatically deliver files to the user via WhatsApp. Only use drive_upload when the user explicitly asks to upload to Drive.
 `;
     } else {
       googlePrompt = `
@@ -288,16 +291,43 @@ NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual co
     }
   }
 
-  // Add MCP config when Google is connected (gives Claude native tools)
+  // Playwright MCP — always enabled (browser automation for all users)
+  const playwrightMcpPath = useSandbox
+    ? '/opt/mcp/node_modules/@playwright/mcp/cli.js'
+    : path.resolve(config.playwrightMcpPath);
+  const playwrightBrowsersPath = useSandbox
+    ? '/opt/playwright-browsers'
+    : config.playwrightBrowsersPath;
+
+  if (!mcpConfig) mcpConfig = { mcpServers: {} };
+  mcpConfig.mcpServers.playwright = {
+    command: nodePath,
+    args: [playwrightMcpPath, '--headless'],
+    env: {
+      PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsersPath,
+      NODE_PATH: useSandbox ? '/opt/mcp/node_modules' : '',
+    },
+  };
+
+  // Add MCP config (gives Claude native tools)
   if (mcpConfig) {
     args.push('--mcp-config', JSON.stringify(mcpConfig));
   }
 
   // Resend prompt — tell Claude about email tools when available
   let resendPrompt = '';
-  if (config.resendApiKey) {
+  if (resendApiKey) {
     resendPrompt = `
-RESEND EMAIL: You have MCP tools from Resend for sending emails, managing contacts, domains, and more. Use the Resend tools (e.g. send_email) when the user asks to send emails via Resend.
+RESEND EMAIL: You have MCP tools from Resend for sending emails, managing contacts, domains, and more. Use the Resend tools (e.g. send-email) when the user asks to send emails via Resend.
+COMMANDS: /resend status — check connection, /resend disconnect — remove API key and disconnect.
+IMPORTANT: Never create or delete API keys without explicit user confirmation. Never expose the user's API key in your response.
+`;
+  } else {
+    resendPrompt = `
+RESEND EMAIL (NOT YET CONNECTED):
+If the user asks about sending emails via Resend — tell them to type /resend to set up their Resend API key.
+COMMANDS: /resend — setup guide, /resend setup <api-key> — connect account, /resend disconnect — remove API key.
+Do NOT attempt to use Resend tools — they are not available until the user connects their account.
 `;
   }
 
@@ -350,7 +380,7 @@ RESEND EMAIL: You have MCP tools from Resend for sending emails, managing contac
       timer = setTimeout(() => {
         proc.kill('SIGTERM');
         releaseClaudeSlot();
-        reject(new Error(`Claude CLI timed out (${config.commandTimeoutMs / 60000} min).`));
+        reject(new Error(`This task is too large for your current plan. Please upgrade your subscription to handle bigger tasks, or try breaking it into smaller steps — I'm happy to help with those!`));
       }, config.commandTimeoutMs);
     }
 

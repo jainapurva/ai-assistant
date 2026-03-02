@@ -143,6 +143,11 @@ async function ensureContainer(chatId) {
       '-v', `${config.nodeBinaryPath}:/usr/local/bin/node:ro`,
       '-v', `${path.resolve(config.mcpServerPath)}:/opt/mcp/google-mcp-server.js:ro`,
       '-v', `${path.resolve(config.resendMcpPath)}:/opt/mcp/resend-mcp-server.mjs:ro`,
+      // Playwright MCP — needs full package tree (cli.js + playwright + playwright-core)
+      '-v', `${path.resolve(path.dirname(config.playwrightMcpPath))}:/opt/mcp/node_modules/@playwright/mcp:ro`,
+      '-v', `${path.resolve(path.join(path.dirname(config.playwrightMcpPath), '..', '..', 'playwright'))}:/opt/mcp/node_modules/playwright:ro`,
+      '-v', `${path.resolve(path.join(path.dirname(config.playwrightMcpPath), '..', '..', 'playwright-core'))}:/opt/mcp/node_modules/playwright-core:ro`,
+      '-v', `${config.playwrightBrowsersPath}:/opt/playwright-browsers:ro`,
     ];
 
     // Claude CLI config file (auth, settings) — mount if it exists on host

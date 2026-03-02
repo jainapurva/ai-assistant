@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "@playwright/mcp": "^0.0.68",
     "dotenv": "^16.4.0",
     "googleapis": "^171.4.0",
     "node-cron": "^4.2.1",

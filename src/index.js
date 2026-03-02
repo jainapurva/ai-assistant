@@ -8,6 +8,7 @@ const { ensureProfile, getProfile, registerUser, getAllProfiles, formatProfileCa
 const apiCommands = require('./api-commands');
 const drive = require('./drive');
 const googleAuth = require('./google-auth');
+const resendAuth = require('./resend-auth');
 const { stripAnsi, chunkMessage } = require('./formatter');
 const { detectOptions } = require('./options');
 const { discoverProjects, getProjectSummary } = require('./projects');
@@ -81,6 +82,10 @@ const quickReplies = new Map();
 const pendingProjectPolls = new Map();
 const pendingFilePolls = new Map(); // chatId -> { files: [{ name, fullPath }] }
 
+// Media batching: accumulate rapid-fire media messages before processing
+const mediaBatch = new Map(); // chatId -> { msgs: [], timer, firstMsg, caption, senderId, senderName }
+const MEDIA_BATCH_WINDOW_MS = 3000; // 3-second window to accumulate multiple media
+
 // --- Poll state helpers (local Maps) ---
 function getPendingPoll(chatId) { return pendingPolls.get(chatId) || null; }
 function setPendingPoll(chatId, data) { pendingPolls.set(chatId, data); }
@@ -151,14 +156,14 @@ async function sendClaudeResponse(msg, chatId, responseText) {
 /**
  * Main handler: process a prompt and send to Claude
  */
-async function handlePrompt(msg, chatId, prompt, mediaPath, senderName, senderId) {
+async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderId) {
   const isGroup = chatId.endsWith('@g.us');
 
   if (processing.has(chatId)) {
     // Queue the message instead of rejecting
     if (!messageQueue.has(chatId)) messageQueue.set(chatId, []);
     const queue = messageQueue.get(chatId);
-    queue.push({ msg, chatId, prompt, mediaPath, senderName, senderId });
+    queue.push({ msg, chatId, prompt, mediaPaths, senderName, senderId });
     await botReply(msg, `📋 Queued (#${queue.length} in line). I'll get to it after the current task.`);
     return;
   }
@@ -188,9 +193,82 @@ async function handlePrompt(msg, chatId, prompt, mediaPath, senderName, senderId
 
   try {
     const sbKey = getSandboxKey(chatId, senderId || config.whitelistedNumber);
+
+    // Snapshot workspace files before Claude runs (for detecting new output files)
+    // Use the per-user sandbox workspace so each user's files are isolated
+    let workspaceDir;
+    if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
+      workspaceDir = path.join(sandbox.getSandboxDir(sbKey), 'workspace');
+    } else {
+      workspaceDir = getProjectDir(chatId) || process.env.HOME;
+    }
+    let filesBefore = new Map(); // filename -> mtime
+    try {
+      for (const f of fs.readdirSync(workspaceDir)) {
+        try {
+          const stat = fs.statSync(path.join(workspaceDir, f));
+          if (stat.isFile()) filesBefore.set(f, stat.mtimeMs);
+        } catch {}
+      }
+    } catch {}
+
     const rawResponse = await runClaude(prompt, chatId, sbKey);
     clearTimeout(workingTimer);
     const cleaned = stripAnsi(rawResponse).trim();
+
+    // Detect new files Claude created and send them to the user
+    // < 10MB → send via WhatsApp directly
+    // >= 10MB → upload to Google Drive (if connected), else warn
+    const SENDABLE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.pdf', '.mp4', '.mp3', '.ogg', '.csv', '.xlsx', '.docx', '.pptx', '.zip', '.txt', '.html', '.json', '.svg']);
+    const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
+    const DRIVE_THRESHOLD_BYTES = 10 * 1024 * 1024; // 10MB — above this, upload to Drive
+
+    try {
+      const filesAfter = fs.readdirSync(workspaceDir);
+      const fileSenderId = senderId || config.whitelistedNumber;
+      const driveConnected = drive.isConfigured() && googleAuth.isConfigured() && googleAuth.getStatus(fileSenderId).connected;
+
+      for (const f of filesAfter) {
+        const fullPath = path.join(workspaceDir, f);
+        try {
+          const stat = fs.statSync(fullPath);
+          if (!stat.isFile()) continue;
+          // Only new files (not existing before Claude ran)
+          if (filesBefore.has(f)) continue;
+          // Skip uploaded media files (user's own input, not Claude's output)
+          if (f.startsWith('wa_')) continue;
+          const ext = path.extname(f).toLowerCase();
+          if (!SENDABLE_EXTS.has(ext)) continue;
+          if (stat.size === 0) continue;
+
+          if (stat.size >= DRIVE_THRESHOLD_BYTES) {
+            // Large file → upload to Google Drive
+            if (driveConnected) {
+              logger.info(`Output file ${f} is ${(stat.size / 1048576).toFixed(1)}MB — uploading to Drive`);
+              try {
+                const link = await drive.uploadFile(fileSenderId, chatId, chatId, fullPath);
+                await botReply(msg, `📤 *${f}* (${(stat.size / 1048576).toFixed(1)}MB) uploaded to Drive:\n${link}`);
+              } catch (e) {
+                await botReply(msg, `⚠️ File *${f}* is ${(stat.size / 1048576).toFixed(1)}MB — Drive upload failed: ${e.message}`);
+              }
+            } else {
+              await botReply(msg, `⚠️ *${f}* is ${(stat.size / 1048576).toFixed(1)}MB — too large for WhatsApp. Use \`/gmail login\` to enable Drive uploads.`);
+            }
+          } else {
+            // Small file → send directly via WhatsApp
+            logger.info(`Sending output file to user: ${f} (${(stat.size / 1024).toFixed(1)}KB)`);
+            await provider.sendMedia(chatId, fullPath, {
+              sendMediaAsDocument: !IMAGE_EXTS.has(ext),
+              caption: f,
+            });
+          }
+        } catch (e) {
+          logger.warn(`Failed to send output file ${f}: ${e.message}`);
+        }
+      }
+    } catch (e) {
+      logger.warn(`Failed to scan workspace for output files: ${e.message}`);
+    }
 
     if (!cleaned) {
       chatLogger.logAIResponse(logSenderId, chatId, '(no text output)');
@@ -217,8 +295,10 @@ async function handlePrompt(msg, chatId, prompt, mediaPath, senderName, senderId
     processing.delete(chatId);
     await provider.clearTyping(chatId);
     // Clean up media for this task
-    if (mediaPath) {
-      try { fs.unlinkSync(mediaPath); } catch (e) {}
+    if (mediaPaths) {
+      for (const mp of mediaPaths) {
+        try { fs.unlinkSync(mp); } catch (e) {}
+      }
     }
     // Process next queued message if any
     processQueue(chatId);
@@ -233,7 +313,7 @@ function processQueue(chatId) {
   if (queue.length === 0) messageQueue.delete(chatId);
   logger.info(`Dequeuing next message for ${chatId} (${queue ? queue.length : 0} remaining)`);
   // Fire and forget — handlePrompt manages its own lifecycle
-  handlePrompt(next.msg, next.chatId, next.prompt, next.mediaPath, next.senderName, next.senderId);
+  handlePrompt(next.msg, next.chatId, next.prompt, next.mediaPaths, next.senderName, next.senderId);
 }
 
 function getQueueLength(chatId) {
@@ -247,9 +327,13 @@ Just send any message and Claude will execute it autonomously on your PC.
 
 *Supported inputs:*
 📝 Text — any instruction or question
-🖼️ Images — send a photo with optional caption
-📄 Documents — PDFs and other files
+🖼️ Images — send one or multiple photos
+📄 Documents — PDFs, Word, Excel, and more
+🎵 Audio — voice messages and audio files
+🎬 Video — video files
 🗳️ Polls — when Claude gives options, tap to choose!
+
+_Files Claude creates are automatically sent back to you!_
 
 *Multiple sessions:*
 Create WhatsApp groups with "Claude" in the name!
@@ -270,6 +354,7 @@ Claude loads CLAUDE.md, skills & commands from the project dir.
 /imagine <prompt> - Generate an image (DALL-E 3)
 /drive - List files uploaded to Google Drive
 /gmail - Gmail status, login, send, inbox, read
+/resend - Resend email setup, status, disconnect
 /sandbox - View sandbox status & disk usage
 /sandbox clean - Clean sandbox workspace
 /isolate - Give this group its own sandbox (separate from your DM)
@@ -429,11 +514,9 @@ provider.on('message', async (msg) => {
 
   // Determine if this is a message we can handle
   const isText = msg.type === 'chat';
-  const isImage = msg.type === 'image';
-  const isDocument = msg.type === 'document';
   const hasMedia = msg.hasMedia;
 
-  if (!isText && !isImage && !isDocument) return;
+  if (!isText && !hasMedia) return;
 
   const caption = msg.body || '';
 
@@ -536,6 +619,10 @@ provider.on('message', async (msg) => {
       clearPendingProjectPoll(chatId);
       resetTokenUsage(chatId);
       pendingFilePolls.delete(chatId);
+      // Clear any pending media batch
+      const batch = mediaBatch.get(chatId);
+      if (batch && batch.timer) clearTimeout(batch.timer);
+      mediaBatch.delete(chatId);
       messageQueue.delete(chatId);
       if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
         sandbox.removeContainer(chatId);
@@ -992,6 +1079,69 @@ provider.on('message', async (msg) => {
       return;
     }
 
+    // /resend [status|setup|disconnect] — Resend email integration
+    const resendMatch = caption.match(/^\/resend(?:\s+(.*))?$/is);
+    if (resendMatch) {
+      const resendSenderId = senderId || config.whitelistedNumber;
+      const rawArgs = (resendMatch[1] || '').trim();
+      const subcommand = rawArgs.toLowerCase().split(/\s+/)[0] || '';
+
+      // /resend or /resend status
+      if (!subcommand || subcommand === 'status') {
+        const status = resendAuth.getStatus(resendSenderId);
+        if (status.connected) {
+          await botReply(msg, `*Resend connected*\n\nConnected: ${new Date(status.connectedAt).toLocaleDateString()}\n\nYou can ask your AI assistant to send emails, manage domains, and more using Resend.\n\n\`/resend disconnect\` to remove your API key.`);
+        } else {
+          await botReply(msg,
+            `*Resend — Setup Guide*\n\n` +
+            `1. Go to resend.com and create a free account\n` +
+            `2. Verify your domain: Settings > Domains > Add Domain\n` +
+            `   _(add the DNS records Resend gives you)_\n` +
+            `3. Create an API key: Settings > API Keys > Create\n` +
+            `4. Send your key here:\n\n` +
+            `\`/resend setup re_your_key_here\`\n\n` +
+            `_Free tier: 100 emails/day, 3,000/month._`
+          );
+        }
+        return;
+      }
+
+      // /resend setup <api-key>
+      if (subcommand === 'setup') {
+        const apiKey = rawArgs.replace(/^setup\s*/i, '').trim();
+        if (!apiKey || !apiKey.startsWith('re_')) {
+          await botReply(msg, 'Usage: `/resend setup re_your_api_key`\n\nGet your API key from resend.com > Settings > API Keys.');
+          return;
+        }
+        await botReply(msg, 'Validating API key...');
+        const result = await resendAuth.validateKey(apiKey);
+        if (!result.valid) {
+          await botReply(msg, `Invalid API key: ${result.error}\n\nPlease check the key and try again.`);
+          return;
+        }
+        resendAuth.setUserKey(resendSenderId, {
+          apiKey,
+          connectedAt: new Date().toISOString(),
+        });
+        const domainList = result.domains.length > 0
+          ? result.domains.map(d => `  - ${d.name} (${d.status})`).join('\n')
+          : '  _(no domains yet — add one at resend.com)_';
+        await botReply(msg, `*Resend connected!*\n\nYour domains:\n${domainList}\n\nYou can now ask your AI assistant to send emails, manage domains, and more.\n\n\`/resend disconnect\` to remove your API key.`);
+        return;
+      }
+
+      // /resend disconnect
+      if (subcommand === 'disconnect') {
+        resendAuth.removeUserKey(resendSenderId);
+        await botReply(msg, 'Resend disconnected. Your API key has been removed.');
+        return;
+      }
+
+      // Unknown subcommand — show help
+      await botReply(msg, `*Resend commands:*\n\n\`/resend\` — Setup guide / connection status\n\`/resend setup <api-key>\` — Connect your Resend account\n\`/resend status\` — Check connection\n\`/resend disconnect\` — Remove API key`);
+      return;
+    }
+
     // /model [name] — view or set the Claude model for this chat (admin-only in groups)
     const modelMatch = caption.match(/^\/model(?:\s+(.+))?$/i);
     if (modelMatch) {
@@ -1213,31 +1363,7 @@ provider.on('message', async (msg) => {
     }
   }
 
-  let prompt = caption;
-  let mediaPath = null;
-
-  // Download media if present
-  if (hasMedia && (isImage || isDocument)) {
-    await botReply(msg, '📥 Downloading media...');
-    mediaPath = await provider.downloadMedia(msg);
-
-    if (!mediaPath) {
-      await botReply(msg, '❌ Failed to download media.');
-      return;
-    }
-
-    if (isImage) {
-      const userCaption = caption || 'Analyze this image and describe what you see.';
-      prompt = `Look at this image file: ${mediaPath}\n\n${userCaption}`;
-    } else if (isDocument) {
-      const userCaption = caption || 'Analyze this document.';
-      prompt = `Look at this file: ${mediaPath}\n\n${userCaption}`;
-    }
-
-    logger.info(`Media prompt: ${prompt.slice(0, 150)}...`);
-  }
-
-  // Resolve sender name and auto-create profile for group messages
+  // Resolve sender name for this message
   let senderName = config.botName;
   if (isGroup && !msg.fromMe) {
     const contactInfo = await provider.getContactFromMessage(msg);
@@ -1246,12 +1372,100 @@ provider.on('message', async (msg) => {
     }
     ensureProfile(senderId, senderName);
   } else if (!msg.fromMe && msg.pushName) {
-    // For Cloud API DMs, use pushName for profile
     senderName = msg.pushName;
     ensureProfile(senderId, senderName);
   }
 
-  await handlePrompt(msg, chatId, prompt, mediaPath, senderName, senderId);
+  // Media messages: batch multiple rapid-fire media into one prompt
+  if (hasMedia) {
+    const batch = mediaBatch.get(chatId) || { msgs: [], timer: null, firstMsg: null, caption: '', senderId, senderName };
+    batch.msgs.push(msg);
+    if (!batch.firstMsg) batch.firstMsg = msg;
+    if (caption) batch.caption = caption; // WhatsApp puts caption on the first media
+
+    // Reset timer on each new media message
+    if (batch.timer) clearTimeout(batch.timer);
+    batch.timer = setTimeout(async () => {
+      mediaBatch.delete(chatId);
+      const batchMsgs = batch.msgs;
+      const batchCaption = batch.caption;
+
+      // Download all media
+      if (batchMsgs.length > 1) {
+        await botReply(batch.firstMsg, `📥 Downloading ${batchMsgs.length} files...`);
+      } else {
+        await botReply(batch.firstMsg, '📥 Downloading media...');
+      }
+
+      const paths = [];
+      for (const m of batchMsgs) {
+        const p = await provider.downloadMedia(m);
+        if (p) paths.push({ path: p, type: m.type, fileName: m.fileName || null });
+      }
+
+      if (paths.length === 0) {
+        await botReply(batch.firstMsg, '❌ Failed to download media.');
+        return;
+      }
+
+      // If sandbox is enabled, copy media into the workspace so Claude can access it inside Docker
+      const useSandbox = config.sandboxEnabled && sandbox.isDockerAvailable();
+      const mediaPaths = []; // host paths for cleanup
+
+      for (const p of paths) {
+        const filename = path.basename(p.path);
+        if (useSandbox) {
+          const sbKey = getSandboxKey(chatId, batch.senderId);
+          const workspaceDir = path.join(sandbox.getSandboxDir(sbKey), 'workspace');
+          fs.mkdirSync(workspaceDir, { recursive: true });
+          const destPath = path.join(workspaceDir, filename);
+          fs.copyFileSync(p.path, destPath);
+          // Use container-visible path for the prompt
+          p.promptPath = `/workspace/${filename}`;
+          mediaPaths.push(p.path, destPath); // clean up both original and copy
+        } else {
+          p.promptPath = p.path;
+          mediaPaths.push(p.path);
+        }
+      }
+
+      // Build prompt based on number and types of media
+      let prompt;
+
+      if (paths.length === 1) {
+        const { promptPath: mp, type, fileName } = paths[0];
+        if (type === 'image') {
+          prompt = `Look at this image file: ${mp}\n\n${batchCaption || 'Analyze this image and describe what you see.'}`;
+        } else if (type === 'document') {
+          const docName = fileName ? ` (${fileName})` : '';
+          prompt = `Look at this file${docName}: ${mp}\n\n${batchCaption || 'Analyze this document.'}`;
+        } else if (type === 'audio') {
+          prompt = `Listen to this audio file: ${mp}\n\n${batchCaption || 'Transcribe and analyze this audio.'}`;
+        } else if (type === 'video') {
+          prompt = `Look at this video file: ${mp}\n\n${batchCaption || 'Analyze this video.'}`;
+        } else {
+          prompt = `Look at this file: ${mp}\n\n${batchCaption || 'Analyze this file.'}`;
+        }
+      } else {
+        // Multiple media — list all files
+        const fileList = paths.map(p => {
+          const label = p.type === 'image' ? 'Image' : p.type === 'video' ? 'Video' : p.type === 'audio' ? 'Audio' : 'File';
+          const name = p.fileName ? ` (${p.fileName})` : '';
+          return `- ${label}${name}: ${p.promptPath}`;
+        }).join('\n');
+        prompt = `Look at these files:\n${fileList}\n\n${batchCaption || 'Analyze these files.'}`;
+      }
+
+      logger.info(`Media batch prompt (${paths.length} files): ${prompt.slice(0, 200)}...`);
+      await handlePrompt(batch.firstMsg, chatId, prompt, mediaPaths, batch.senderName, batch.senderId);
+    }, MEDIA_BATCH_WINDOW_MS);
+
+    mediaBatch.set(chatId, batch);
+    return; // don't fall through — batch timer will handle processing
+  }
+
+  // Text-only messages: process immediately
+  await handlePrompt(msg, chatId, caption, null, senderName, senderId);
 });
 
 // --- Internal HTTP API for external services (e.g. Shorty trading bot) ---

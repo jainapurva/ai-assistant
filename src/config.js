@@ -8,7 +8,7 @@ module.exports = {
   claudePath: process.env.CLAUDE_PATH || '/home/ddarji/.local/bin/claude',
   claudeModel: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
   maxChunkSize: parseInt(process.env.MAX_RESPONSE_CHARS || '4000', 10),
-  commandTimeoutMs: parseInt(process.env.COMMAND_TIMEOUT_MS || '120000', 10),
+  commandTimeoutMs: parseInt(process.env.COMMAND_TIMEOUT_MS || '600000', 10),
   enableSessions: process.env.ENABLE_SESSIONS !== 'false',
   botName: process.env.BOT_NAME || 'Claude Bot',
   httpPort: parseInt(process.env.HTTP_PORT || '5151', 10),
@@ -40,7 +40,9 @@ module.exports = {
   // MCP server paths (for Google integration inside Docker sandboxes)
   nodeBinaryPath: process.env.NODE_BINARY_PATH || '/home/ddarji/.nvm/versions/node/v20.20.0/bin/node',
   mcpServerPath: process.env.MCP_SERVER_PATH || path.join(__dirname, '..', 'dist', 'google-mcp-server.bundle.js'),
-  // Resend MCP (email via Resend API)
-  resendApiKey: process.env.RESEND_API_KEY || '',
+  // Resend MCP (per-user API keys stored in resend-keys.json)
   resendMcpPath: process.env.RESEND_MCP_PATH || path.join(__dirname, '..', 'dist', 'resend-mcp-server.bundle.mjs'),
+  // Playwright MCP (browser automation)
+  playwrightMcpPath: process.env.PLAYWRIGHT_MCP_PATH || path.join(__dirname, '..', 'node_modules', '@playwright', 'mcp', 'cli.js'),
+  playwrightBrowsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH || '/media/ddarji/storage/.cache/playwright',
 };

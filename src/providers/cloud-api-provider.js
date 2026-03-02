@@ -225,6 +225,9 @@ class CloudAPIProvider extends BaseProvider {
       type = 'video';
       hasMedia = true;
       body = (msg.video && msg.video.caption) || '';
+    } else if (msg.type === 'sticker') {
+      type = 'image'; // treat sticker as image for Claude
+      hasMedia = true;
     } else if (msg.type === 'interactive') {
       // Button / list reply
       if (msg.interactive && msg.interactive.button_reply) {
@@ -249,6 +252,7 @@ class CloudAPIProvider extends BaseProvider {
       hasMedia,
       author: null,
       pushName: pushName,
+      fileName: (msg.document && msg.document.filename) || null,
       _raw: msg,
       _metadata: metadata,
     };
@@ -377,6 +381,7 @@ class CloudAPIProvider extends BaseProvider {
       else if (raw.audio && raw.audio.id) mediaId = raw.audio.id;
       else if (raw.video && raw.video.id) mediaId = raw.video.id;
       else if (raw.voice && raw.voice.id) mediaId = raw.voice.id;
+      else if (raw.sticker && raw.sticker.id) mediaId = raw.sticker.id;
 
       if (!mediaId) {
         logger.warn('No media ID found in message');
@@ -593,9 +598,21 @@ class CloudAPIProvider extends BaseProvider {
       'image/gif': '.gif',
       'application/pdf': '.pdf',
       'video/mp4': '.mp4',
+      'video/3gpp': '.3gp',
       'audio/ogg; codecs=opus': '.ogg',
       'audio/mpeg': '.mp3',
       'audio/aac': '.aac',
+      'audio/amr': '.amr',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+      'application/msword': '.doc',
+      'application/vnd.ms-excel': '.xls',
+      'application/vnd.ms-powerpoint': '.ppt',
+      'text/csv': '.csv',
+      'text/plain': '.txt',
+      'application/zip': '.zip',
+      'application/json': '.json',
     };
     return map[mime] || '.bin';
   }
@@ -609,9 +626,21 @@ class CloudAPIProvider extends BaseProvider {
       '.gif': 'image/gif',
       '.pdf': 'application/pdf',
       '.mp4': 'video/mp4',
+      '.3gp': 'video/3gpp',
       '.ogg': 'audio/ogg',
       '.mp3': 'audio/mpeg',
       '.aac': 'audio/aac',
+      '.amr': 'audio/amr',
+      '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      '.doc': 'application/msword',
+      '.xls': 'application/vnd.ms-excel',
+      '.ppt': 'application/vnd.ms-powerpoint',
+      '.csv': 'text/csv',
+      '.txt': 'text/plain',
+      '.zip': 'application/zip',
+      '.json': 'application/json',
     };
     return map[ext] || 'application/octet-stream';
   }
