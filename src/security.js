@@ -73,6 +73,8 @@ const SECRET_PATTERNS = [
   { label: 'app password',       re: /\b[a-z]{4}\s[a-z]{4}\s[a-z]{4}\s[a-z]{4}\b/gi },
   // Google OAuth access tokens (start with ya29.)
   { label: 'Google OAuth token', re: /ya29\.[A-Za-z0-9_-]{20,}/g },
+  // Resend API keys (re_ prefix)
+  { label: 'Resend API key',    re: /re_[A-Za-z0-9_-]{20,}/g },
 ];
 
 /**

@@ -301,8 +301,10 @@ class CloudAPIProvider extends BaseProvider {
 
   async sendMedia(chatId, filePath, opts = {}) {
     const to = chatId.replace('@c.us', '');
+    logger.info(`sendMedia: uploading ${path.basename(filePath)} for ${to}...`);
     const mediaId = await this._uploadMedia(filePath);
     if (!mediaId) throw new Error('Failed to upload media');
+    logger.info(`sendMedia: uploaded, mediaId=${mediaId}`);
 
     const ext = path.extname(filePath).toLowerCase();
     let mediaType = 'document';
@@ -328,7 +330,8 @@ class CloudAPIProvider extends BaseProvider {
       payload.document.filename = path.basename(filePath);
     }
 
-    await this._graphPost(`/${this.phoneNumberId}/messages`, payload);
+    const result = await this._graphPost(`/${this.phoneNumberId}/messages`, payload);
+    logger.info(`sendMedia: sent ${path.basename(filePath)} as ${payload.type}, response: ${JSON.stringify(result)}`);
   }
 
   async replyWithMedia(originalMsg, filePath, opts = {}) {
@@ -541,8 +544,12 @@ class CloudAPIProvider extends BaseProvider {
         res.on('end', () => {
           try {
             const parsed = JSON.parse(resBody);
+            if (parsed.error) {
+              logger.error(`Media upload API error: ${JSON.stringify(parsed.error)}`);
+            }
             resolve(parsed.id || null);
           } catch {
+            logger.error(`Media upload parse error: ${resBody.slice(0, 300)}`);
             resolve(null);
           }
         });

@@ -258,7 +258,7 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
             // Small file → send directly via WhatsApp
             logger.info(`Sending output file to user: ${f} (${(stat.size / 1024).toFixed(1)}KB)`);
             await provider.sendMedia(chatId, fullPath, {
-              sendMediaAsDocument: !IMAGE_EXTS.has(ext),
+              sendMediaAsDocument: true,
               caption: f,
             });
           }

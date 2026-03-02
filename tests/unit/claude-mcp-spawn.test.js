@@ -61,6 +61,13 @@ const mockGoogleAuth = {
 };
 jest.mock('../../src/google-auth', () => mockGoogleAuth);
 
+// ── Mock resend-auth ───────────────────────────────────────────────────────
+
+const mockResendAuth = {
+  resolveApiKey: jest.fn(() => null),
+};
+jest.mock('../../src/resend-auth', () => mockResendAuth);
+
 // ── Mock security ───────────────────────────────────────────────────────────
 
 jest.mock('../../src/security', () => ({
@@ -82,7 +89,6 @@ jest.mock('../../src/config', () => ({
   stateDir: '/tmp',
   nodeBinaryPath: '/usr/local/bin/node',
   mcpServerPath: '/opt/mcp/google-mcp-server.js',
-  resendApiKey: '',
   resendMcpPath: '/opt/mcp/resend-mcp-server.mjs',
 }));
 
@@ -219,8 +225,8 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     expect(mockLastSpawnOpts.stdio[0]).toBe('ignore');
   });
 
-  test('Resend MCP: added to mcpServers when API key is configured', async () => {
-    mockConfig.resendApiKey = 're_test_key_123';
+  test('Resend MCP: added to mcpServers when user has Resend key', async () => {
+    mockResendAuth.resolveApiKey.mockReturnValue('re_test_key_123');
     mockGoogleAuth.isConfigured.mockReturnValue(false);
 
     resolveProc();
@@ -243,13 +249,10 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
 
     // pipePrompt should be set (MCP active)
     expect(mockLastContainerPipePrompt).toContain('send email');
-
-    // Reset
-    mockConfig.resendApiKey = '';
   });
 
   test('Resend + Google MCP: both present when both configured', async () => {
-    mockConfig.resendApiKey = 're_test_key_456';
+    mockResendAuth.resolveApiKey.mockReturnValue('re_test_key_456');
     mockGoogleAuth.isConfigured.mockReturnValue(true);
     mockGoogleAuth.getStatus.mockReturnValue({ connected: true, email: 'u@g.com' });
 
@@ -264,13 +267,10 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     expect(mcpJson.mcpServers.google).toBeDefined();
     expect(mcpJson.mcpServers.resend.env.RESEND_API_KEY).toBe('re_test_key_456');
     expect(mcpJson.mcpServers.google.env.CHAT_ID).toBe('chat7');
-
-    // Reset
-    mockConfig.resendApiKey = '';
   });
 
   test('no Resend key + no Google: no MCP, prompt as CLI arg', async () => {
-    mockConfig.resendApiKey = '';
+    mockResendAuth.resolveApiKey.mockReturnValue(null);
     mockGoogleAuth.isConfigured.mockReturnValue(false);
 
     resolveProc();
@@ -280,5 +280,18 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     expect(args).not.toContain('--mcp-config');
     expect(args[args.length - 1]).toContain('hello');
     expect(mockLastContainerPipePrompt).toBeNull();
+  });
+
+  test('no user Resend key: prompt tells user about /resend setup', async () => {
+    mockResendAuth.resolveApiKey.mockReturnValue(null);
+    mockGoogleAuth.isConfigured.mockReturnValue(false);
+
+    resolveProc();
+    await runClaude('send email via resend', 'chat9', 'chat9');
+
+    const args = mockLastContainerArgs;
+    expect(args).not.toContain('--mcp-config');
+    // The prompt should mention /resend
+    expect(args[args.length - 1]).toContain('/resend');
   });
 });
