@@ -466,7 +466,6 @@ provider.addRoute('POST', '/send', (req, res) => {
         return res.end(JSON.stringify({ error: 'chatId and message required' }));
       }
       await botSendMessage(chatId, message);
-      markGreeted(chatId);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'sent' }));
     } catch (e) {
@@ -1641,8 +1640,6 @@ const apiServer = http.createServer(async (req, res) => {
           return res.end(JSON.stringify({ error: 'chatId and message required' }));
         }
         await botSendMessage(chatId, message);
-        // Mark user as greeted so they don't get a duplicate welcome
-        markGreeted(chatId);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'sent' }));
       } catch (e) {

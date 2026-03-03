@@ -18,8 +18,10 @@ RUN apt-get update && \
 RUN useradd -m -s /bin/bash -d /home/claude claude
 
 # Pre-create mount points with correct ownership
-RUN mkdir -p /home/claude/.claude /workspace && \
-    chown -R claude:claude /home/claude/.claude /workspace
+# Symlink Playwright default browser path to our mounted browsers
+RUN mkdir -p /home/claude/.claude /workspace /home/claude/.cache && \
+    ln -s /opt/playwright-browsers /home/claude/.cache/ms-playwright && \
+    chown -R claude:claude /home/claude/.claude /home/claude/.cache /workspace
 
 USER claude
 WORKDIR /workspace

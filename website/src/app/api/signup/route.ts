@@ -8,7 +8,23 @@ const BOT_API_URL = process.env.BOT_API_URL || "https://api.readwithme.ai";
 const WELCOME_MESSAGE =
   `Hey! 👋\n\n` +
   `I'm your personal AI assistant — think of me as a teammate who never sleeps and loves a good challenge.\n\n` +
-  `My job? Help you with your chaos. Whether it's answering questions, writing stuff, analyzing photos, managing emails, or just brainstorming — I've got you.\n\n` +
+  `*What can I do?*\n` +
+  `📝 Answer questions & write content\n` +
+  `🖼️ Analyze images — send one or multiple\n` +
+  `📄 Read documents — PDFs, Word, Excel\n` +
+  `🎵 Transcribe audio & voice messages\n` +
+  `🎬 Analyze videos\n` +
+  `📧 Send emails (once connected)\n` +
+  `💻 Write & run code in your own sandbox\n\n` +
+  `*Handy commands:*\n` +
+  `/files — See & download files from your workspace\n` +
+  `/gmail login — Connect your Gmail & Google Drive\n` +
+  `/resend — Set up email sending via Resend\n` +
+  `/sandbox — Check your workspace status\n` +
+  `/usage — See your token usage\n` +
+  `/stop — Cancel a running task\n` +
+  `/reset — Start fresh (clears session)\n` +
+  `/help — Full command list\n\n` +
   `So, what's your first challenge? Let's go! 🚀`;
 
 export async function POST(request: Request) {
