@@ -118,6 +118,8 @@ Before presenting code changes to the user, always:
 
 If any check fails, fix the issue before reporting back. Never present untested code.
 
+6. **End-to-end test after deploy** — After deploying to EC2 or starting a service, always verify the feature works end-to-end by hitting the live endpoint (curl the API, load the page, send a test webhook, etc.). Don't assume a successful build/deploy means the feature works — DB schema mismatches, missing env vars, and runtime errors only surface when you actually exercise the code path. If a deploy includes DB changes, verify the schema is correct on the target database before testing.
+
 ## Storage Policy
 - All data storage must be inside `/home/ddarji/dhruvil/storage/` or `/media/ddarji/storage/`
 - Never write files outside these directories without explicit permission

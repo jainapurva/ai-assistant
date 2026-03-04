@@ -3,20 +3,24 @@
 interface SuccessModalProps {
   open: boolean;
   waLink: string;
+  isPaid?: boolean;
   onClose: () => void;
 }
 
-export default function SuccessModal({ open, waLink, onClose }: SuccessModalProps) {
+export default function SuccessModal({ open, waLink, isPaid, onClose }: SuccessModalProps) {
   if (!open) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div className="mx-4 w-full max-w-md rounded-2xl border border-white/10 bg-surface-light p-8 text-center">
         <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-green-500/20 text-4xl">
-          ✓
+          &#10003;
         </div>
         <h3 className="mt-5 text-2xl font-bold">You&apos;re all set!</h3>
         <p className="mt-3 text-gray-400">
+          {isPaid
+            ? "Your free trial starts now \u2014 you won't be charged for 3 months. "
+            : ""}
           Your account is ready. Tap the button below to open WhatsApp and start
           chatting with your AI assistant.
         </p>

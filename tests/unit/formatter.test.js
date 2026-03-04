@@ -1,4 +1,4 @@
-const { stripAnsi, chunkMessage } = require('../../src/formatter');
+const { stripAnsi, chunkMessage, markdownToWhatsApp } = require('../../src/formatter');
 
 describe('stripAnsi', () => {
   test('removes SGR color codes', () => {
@@ -89,5 +89,63 @@ describe('chunkMessage', () => {
     const rejoined = chunks.join(' ');
     // All original words should be present
     expect(rejoined.split(' ').length).toBe(text.split(' ').length);
+  });
+});
+
+describe('markdownToWhatsApp', () => {
+  test('converts **bold** to *bold*', () => {
+    expect(markdownToWhatsApp('this is **bold** text')).toBe('this is *bold* text');
+  });
+
+  test('converts __text__ to _text_', () => {
+    expect(markdownToWhatsApp('this is __underline__ text')).toBe('this is _underline_ text');
+  });
+
+  test('converts markdown headers to bold', () => {
+    expect(markdownToWhatsApp('## My Header')).toBe('*My Header*');
+    expect(markdownToWhatsApp('### Sub Header')).toBe('*Sub Header*');
+    expect(markdownToWhatsApp('# Title')).toBe('*Title*');
+  });
+
+  test('converts markdown links to text: url', () => {
+    expect(markdownToWhatsApp('[Google](https://google.com)')).toBe('Google: https://google.com');
+  });
+
+  test('converts fenced code blocks to inline code', () => {
+    expect(markdownToWhatsApp('```js\nconsole.log("hi")\n```')).toBe('`console.log("hi")`');
+  });
+
+  test('converts multiline fenced code blocks', () => {
+    const input = '```\nline1\nline2\nline3\n```';
+    expect(markdownToWhatsApp(input)).toBe('`line1\nline2\nline3`');
+  });
+
+  test('converts - list items to bullet', () => {
+    expect(markdownToWhatsApp('- first item\n- second item')).toBe('• first item\n• second item');
+  });
+
+  test('converts * list items to bullet without breaking bold', () => {
+    expect(markdownToWhatsApp('* list item')).toBe('• list item');
+    // *bold* should NOT be converted to bullet
+    expect(markdownToWhatsApp('*bold text*')).toBe('*bold text*');
+  });
+
+  test('handles mixed formatting', () => {
+    const input = '## Title\n\n**Important**: check [docs](https://example.com)\n\n- item 1\n- item 2';
+    const expected = '*Title*\n\n*Important*: check docs: https://example.com\n\n• item 1\n• item 2';
+    expect(markdownToWhatsApp(input)).toBe(expected);
+  });
+
+  test('passes through plain text unchanged', () => {
+    expect(markdownToWhatsApp('hello world')).toBe('hello world');
+  });
+
+  test('passes through WhatsApp formatting unchanged', () => {
+    expect(markdownToWhatsApp('*bold* _italic_ ~strike~ `code`')).toBe('*bold* _italic_ ~strike~ `code`');
+  });
+
+  test('handles null/empty input', () => {
+    expect(markdownToWhatsApp(null)).toBe(null);
+    expect(markdownToWhatsApp('')).toBe('');
   });
 });

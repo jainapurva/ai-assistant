@@ -1,0 +1,328 @@
+"use client";
+
+import { useState } from "react";
+import dynamic from "next/dynamic";
+import { countryCodes } from "@/lib/country-codes";
+
+const CardForm = dynamic(() => import("./CardForm"), { ssr: false });
+
+interface SubscriptionData {
+  phone: string;
+  signupDate: string;
+  trialExpiresAt: string | null;
+  subscriptionStatus: string;
+  lastPaymentAt: string | null;
+  square: {
+    status: string;
+    startDate: string | null;
+    chargedThroughDate: string | null;
+    canceledDate: string | null;
+  } | null;
+}
+
+const STATUS_BADGES: Record<string, { label: string; className: string }> = {
+  trialing: {
+    label: "Free Trial",
+    className: "bg-yellow-500/20 text-yellow-300 border-yellow-500/30",
+  },
+  active: {
+    label: "Active",
+    className: "bg-green-500/20 text-green-300 border-green-500/30",
+  },
+  past_due: {
+    label: "Past Due",
+    className: "bg-red-500/20 text-red-300 border-red-500/30",
+  },
+  canceled: {
+    label: "Canceled",
+    className: "bg-gray-500/20 text-gray-300 border-gray-500/30",
+  },
+};
+
+function formatDate(dateStr: string | null): string {
+  if (!dateStr) return "N/A";
+  return new Date(dateStr).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+}
+
+export default function AccountManager() {
+  const [countryDial, setCountryDial] = useState("+1");
+  const [phone, setPhone] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [data, setData] = useState<SubscriptionData | null>(null);
+  const [canceling, setCanceling] = useState(false);
+  const [showConfirmCancel, setShowConfirmCancel] = useState(false);
+  const [showCardUpdate, setShowCardUpdate] = useState(false);
+  const [updatingCard, setUpdatingCard] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const fullPhone = countryDial + phone.replace(/[\s\-().]/g, "");
+
+  const lookupAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setData(null);
+    setMessage("");
+    setLoading(true);
+
+    try {
+      const res = await fetch("/api/subscription/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone: fullPhone }),
+      });
+      const result = await res.json();
+
+      if (!res.ok) {
+        setError(result.error || "Account not found");
+        return;
+      }
+
+      setData(result);
+    } catch {
+      setError("Network error. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    setCanceling(true);
+    setMessage("");
+    setError("");
+
+    try {
+      const res = await fetch("/api/subscription/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone: fullPhone }),
+      });
+      const result = await res.json();
+
+      if (!res.ok) {
+        setError(result.error || "Failed to cancel");
+        return;
+      }
+
+      setMessage(
+        `Subscription canceled. You'll have access until ${formatDate(result.chargedThroughDate)}.`
+      );
+      setShowConfirmCancel(false);
+      // Refresh data
+      setData((prev) =>
+        prev ? { ...prev, subscriptionStatus: "canceled" } : null
+      );
+    } catch {
+      setError("Network error. Please try again.");
+    } finally {
+      setCanceling(false);
+    }
+  };
+
+  const handleCardUpdate = async (token: string) => {
+    setUpdatingCard(true);
+    setMessage("");
+    setError("");
+
+    try {
+      const res = await fetch("/api/subscription/update-card", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone: fullPhone, paymentToken: token }),
+      });
+      const result = await res.json();
+
+      if (!res.ok) {
+        setError(result.error || "Failed to update card");
+        return;
+      }
+
+      setMessage("Payment method updated successfully.");
+      setShowCardUpdate(false);
+    } catch {
+      setError("Network error. Please try again.");
+    } finally {
+      setUpdatingCard(false);
+    }
+  };
+
+  const badge = data
+    ? STATUS_BADGES[data.subscriptionStatus] || STATUS_BADGES.active
+    : null;
+
+  return (
+    <section className="px-6 py-12">
+      <div className="mx-auto max-w-lg">
+        <h1 className="text-center text-3xl font-bold">
+          Manage Your <span className="text-primary-light">Account</span>
+        </h1>
+        <p className="mt-3 text-center text-gray-400">
+          Enter your WhatsApp number to view your subscription.
+        </p>
+
+        {/* Phone lookup form */}
+        <form onSubmit={lookupAccount} className="mt-8 space-y-4">
+          <div className="flex gap-2">
+            <select
+              value={countryDial}
+              onChange={(e) => setCountryDial(e.target.value)}
+              className="w-[120px] shrink-0 rounded-xl border border-white/10 bg-surface-lighter px-3 py-3 text-white outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
+            >
+              {countryCodes.map((c) => (
+                <option key={`${c.code}-${c.dial}`} value={c.dial}>
+                  {c.flag} {c.dial}
+                </option>
+              ))}
+            </select>
+            <input
+              type="tel"
+              placeholder="555 123 4567"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              required
+              className="w-full rounded-xl border border-white/10 bg-surface-lighter px-4 py-3 text-white placeholder-gray-500 outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full rounded-xl bg-primary py-3 font-semibold transition hover:bg-primary-dark disabled:opacity-50"
+          >
+            {loading ? "Looking up..." : "Look Up Account"}
+          </button>
+        </form>
+
+        {error && (
+          <p className="mt-4 rounded-lg bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
+            {error}
+          </p>
+        )}
+
+        {message && (
+          <p className="mt-4 rounded-lg bg-green-500/10 px-4 py-2.5 text-sm text-green-400">
+            {message}
+          </p>
+        )}
+
+        {/* Subscription dashboard */}
+        {data && (
+          <div className="mt-8 space-y-6">
+            {/* Status card */}
+            <div className="rounded-2xl border border-white/10 bg-surface-lighter p-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-semibold">Subscription</h2>
+                {badge && (
+                  <span
+                    className={`rounded-full border px-3 py-1 text-xs font-medium ${badge.className}`}
+                  >
+                    {badge.label}
+                  </span>
+                )}
+              </div>
+
+              <dl className="mt-4 space-y-3 text-sm">
+                <div className="flex justify-between">
+                  <dt className="text-gray-400">Signed up</dt>
+                  <dd>{formatDate(data.signupDate)}</dd>
+                </div>
+
+                {data.subscriptionStatus === "trialing" &&
+                  data.trialExpiresAt && (
+                    <div className="flex justify-between">
+                      <dt className="text-gray-400">Trial ends</dt>
+                      <dd>{formatDate(data.trialExpiresAt)}</dd>
+                    </div>
+                  )}
+
+                {data.square?.chargedThroughDate && (
+                  <div className="flex justify-between">
+                    <dt className="text-gray-400">
+                      {data.subscriptionStatus === "canceled"
+                        ? "Access until"
+                        : "Next billing date"}
+                    </dt>
+                    <dd>{formatDate(data.square.chargedThroughDate)}</dd>
+                  </div>
+                )}
+
+                {data.lastPaymentAt && (
+                  <div className="flex justify-between">
+                    <dt className="text-gray-400">Last payment</dt>
+                    <dd>{formatDate(data.lastPaymentAt)}</dd>
+                  </div>
+                )}
+              </dl>
+            </div>
+
+            {/* Actions */}
+            {data.subscriptionStatus !== "canceled" && (
+              <div className="space-y-3">
+                {/* Update card */}
+                {!showCardUpdate ? (
+                  <button
+                    onClick={() => setShowCardUpdate(true)}
+                    className="w-full rounded-xl border border-white/10 bg-surface-lighter py-3 font-medium transition hover:border-white/20"
+                  >
+                    Update Payment Method
+                  </button>
+                ) : (
+                  <div className="rounded-2xl border border-white/10 bg-surface-lighter p-6">
+                    <h3 className="mb-4 font-semibold">
+                      Update Payment Method
+                    </h3>
+                    <CardForm
+                      onTokenized={handleCardUpdate}
+                      submitting={updatingCard}
+                    />
+                    <button
+                      onClick={() => setShowCardUpdate(false)}
+                      className="mt-3 w-full text-sm text-gray-400 hover:text-gray-300"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+
+                {/* Cancel subscription */}
+                {!showConfirmCancel ? (
+                  <button
+                    onClick={() => setShowConfirmCancel(true)}
+                    className="w-full rounded-xl py-3 text-sm text-gray-400 transition hover:text-red-400"
+                  >
+                    Cancel Subscription
+                  </button>
+                ) : (
+                  <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-6">
+                    <p className="text-sm text-gray-300">
+                      Are you sure? You&apos;ll keep access until the end of
+                      your current billing period.
+                    </p>
+                    <div className="mt-4 flex gap-3">
+                      <button
+                        onClick={handleCancel}
+                        disabled={canceling}
+                        className="flex-1 rounded-xl bg-red-600 py-2.5 text-sm font-semibold transition hover:bg-red-700 disabled:opacity-50"
+                      >
+                        {canceling ? "Canceling..." : "Yes, Cancel"}
+                      </button>
+                      <button
+                        onClick={() => setShowConfirmCancel(false)}
+                        className="flex-1 rounded-xl border border-white/10 py-2.5 text-sm transition hover:border-white/20"
+                      >
+                        Keep Subscription
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}

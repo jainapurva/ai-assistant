@@ -1,9 +1,9 @@
 #!/bin/bash
 
 ###############################################################################
-# AWS Deployment Script for Read With Me (readwithme.ai)
+# AWS Deployment Script for Swayat (swayat.com)
 # Builds locally, deploys standalone Next.js app to EC2
-# Domain: readwithme.ai  |  Port: 3003
+# Domain: swayat.com  |  Port: 3003
 ###############################################################################
 
 set -e
@@ -20,15 +20,15 @@ NC='\033[0m'
 AWS_HOST="3.238.88.157"
 AWS_USER="ubuntu"
 SSH_KEY="/media/ddarji/storage/git/free_uploader/socialAI.pem"
-REMOTE_DIR="/opt/readwithme"
-SERVICE_NAME="readwithme"
-DOMAIN="readwithme.ai"
+REMOTE_DIR="/opt/swayat"
+SERVICE_NAME="swayat"
+DOMAIN="swayat.com"
 PORT=3003
 
 cd "$(dirname "$0")"
 
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${BLUE}  Read With Me - Deploy to AWS EC2${NC}"
+echo -e "${BLUE}  Swayat - Deploy to AWS EC2${NC}"
 echo -e "${CYAN}  Domain: ${DOMAIN}  |  Port: ${PORT}${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
@@ -137,17 +137,17 @@ echo ""
 echo -e "${YELLOW}Step 6: Configuring systemd service...${NC}"
 
 ssh -i "$SSH_KEY" "$AWS_USER@$AWS_HOST" << 'ENDSSH'
-sudo tee /etc/systemd/system/readwithme.service > /dev/null <<'SERVICE_EOF'
+sudo tee /etc/systemd/system/swayat.service > /dev/null <<'SERVICE_EOF'
 [Unit]
-Description=Read With Me - Landing Page (Next.js)
+Description=Swayat - Landing Page (Next.js)
 After=network.target
 
 [Service]
 Type=simple
 User=ubuntu
 Group=ubuntu
-WorkingDirectory=/opt/readwithme
-EnvironmentFile=/opt/readwithme/.env
+WorkingDirectory=/opt/swayat
+EnvironmentFile=/opt/swayat/.env
 Environment="NODE_ENV=production"
 Environment="PORT=3003"
 Environment="HOSTNAME=0.0.0.0"
@@ -162,7 +162,7 @@ WantedBy=multi-user.target
 SERVICE_EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable readwithme
+sudo systemctl enable swayat
 ENDSSH
 
 echo -e "${GREEN}  Service configured${NC}"
@@ -174,11 +174,11 @@ echo ""
 echo -e "${YELLOW}Step 7: Configuring nginx...${NC}"
 
 ssh -i "$SSH_KEY" "$AWS_USER@$AWS_HOST" << 'ENDSSH'
-if [ ! -f /etc/nginx/sites-available/readwithme.ai ]; then
-    sudo tee /etc/nginx/sites-available/readwithme.ai > /dev/null <<'NGINX_EOF'
+if [ ! -f /etc/nginx/sites-available/swayat.com ]; then
+    sudo tee /etc/nginx/sites-available/swayat.com > /dev/null <<'NGINX_EOF'
 server {
     listen 80;
-    server_name readwithme.ai www.readwithme.ai;
+    server_name swayat.com www.swayat.com;
 
     client_max_body_size 10M;
 
@@ -196,7 +196,7 @@ server {
 }
 NGINX_EOF
 
-    sudo ln -sf /etc/nginx/sites-available/readwithme.ai /etc/nginx/sites-enabled/
+    sudo ln -sf /etc/nginx/sites-available/swayat.com /etc/nginx/sites-enabled/
     echo "Nginx config created"
 else
     echo "Nginx config already exists (preserving certbot changes)"
@@ -214,14 +214,14 @@ echo ""
 echo -e "${YELLOW}Step 8: Checking SSL certificate...${NC}"
 
 ssh -i "$SSH_KEY" "$AWS_USER@$AWS_HOST" << 'ENDSSH'
-if sudo certbot certificates 2>/dev/null | grep -q "readwithme.ai"; then
+if sudo certbot certificates 2>/dev/null | grep -q "swayat.com"; then
     echo "SSL certificate already exists"
 else
     echo "Requesting SSL certificate..."
-    sudo certbot --nginx -d readwithme.ai -d www.readwithme.ai --non-interactive --agree-tos --email dhruvil.darji@gmail.com || {
+    sudo certbot --nginx -d swayat.com -d www.swayat.com --non-interactive --agree-tos --email dhruvil.darji@gmail.com || {
         echo "WARNING: Certbot failed. Make sure DNS A records point to this server."
         echo "You can run certbot manually later:"
-        echo "  sudo certbot --nginx -d readwithme.ai -d www.readwithme.ai"
+        echo "  sudo certbot --nginx -d swayat.com -d www.swayat.com"
     }
 fi
 ENDSSH
@@ -235,8 +235,8 @@ echo ""
 echo -e "${YELLOW}Step 9: Checking .env file...${NC}"
 
 ssh -i "$SSH_KEY" "$AWS_USER@$AWS_HOST" << 'ENDSSH'
-if [ ! -f /opt/readwithme/.env ]; then
-    tee /opt/readwithme/.env > /dev/null <<'ENV_EOF'
+if [ ! -f /opt/swayat/.env ]; then
+    tee /opt/swayat/.env > /dev/null <<'ENV_EOF'
 # AWS DynamoDB (fill in with real credentials)
 AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=
@@ -249,7 +249,7 @@ DYNAMODB_PROMO_TABLE=rwm-promo-codes
 # WhatsApp bot phone number (digits only)
 BOT_PHONE_NUMBER=15551234567
 ENV_EOF
-    echo ".env template created — EDIT /opt/readwithme/.env with real values"
+    echo ".env template created — EDIT /opt/swayat/.env with real values"
 else
     echo ".env already exists"
 fi
@@ -264,10 +264,10 @@ echo ""
 echo -e "${YELLOW}Step 10: Starting service...${NC}"
 
 ssh -i "$SSH_KEY" "$AWS_USER@$AWS_HOST" << 'ENDSSH'
-sudo systemctl restart readwithme
+sudo systemctl restart swayat
 sleep 3
 echo "Service status:"
-sudo systemctl is-active readwithme
+sudo systemctl is-active swayat
 ENDSSH
 
 echo -e "${GREEN}  Service started${NC}"
@@ -280,11 +280,11 @@ echo -e "${YELLOW}Step 11: Verifying deployment...${NC}"
 
 VERIFY_FAILED=0
 
-if ssh -i "$SSH_KEY" "$AWS_USER@$AWS_HOST" "sudo systemctl is-active --quiet readwithme"; then
-    echo -e "${GREEN}  readwithme service: active${NC}"
+if ssh -i "$SSH_KEY" "$AWS_USER@$AWS_HOST" "sudo systemctl is-active --quiet swayat"; then
+    echo -e "${GREEN}  swayat service: active${NC}"
 else
-    echo -e "${RED}  readwithme service: FAILED${NC}"
-    ssh -i "$SSH_KEY" "$AWS_USER@$AWS_HOST" "sudo journalctl -u readwithme -n 15 --no-pager"
+    echo -e "${RED}  swayat service: FAILED${NC}"
+    ssh -i "$SSH_KEY" "$AWS_USER@$AWS_HOST" "sudo journalctl -u swayat -n 15 --no-pager"
     VERIFY_FAILED=1
 fi
 
@@ -319,11 +319,11 @@ fi
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 echo "URLs:"
-echo "   https://readwithme.ai"
+echo "   https://swayat.com"
 echo ""
 echo "Server commands:"
-echo "   Status:   ssh -i $SSH_KEY $AWS_USER@$AWS_HOST 'sudo systemctl status readwithme'"
-echo "   Logs:     ssh -i $SSH_KEY $AWS_USER@$AWS_HOST 'sudo journalctl -u readwithme -f'"
-echo "   Restart:  ssh -i $SSH_KEY $AWS_USER@$AWS_HOST 'sudo systemctl restart readwithme'"
+echo "   Status:   ssh -i $SSH_KEY $AWS_USER@$AWS_HOST 'sudo systemctl status swayat'"
+echo "   Logs:     ssh -i $SSH_KEY $AWS_USER@$AWS_HOST 'sudo journalctl -u swayat -f'"
+echo "   Restart:  ssh -i $SSH_KEY $AWS_USER@$AWS_HOST 'sudo systemctl restart swayat'"
 echo ""
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

@@ -1,0 +1,23 @@
+[Unit]
+Description=AI Assistant WhatsApp Bot
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=ddarji
+Group=ddarji
+WorkingDirectory=/media/ddarji/storage/git/ai-assistant
+ExecStart=/home/ddarji/.nvm/versions/node/v20.20.0/bin/node src/index.js
+# Watchdog handles restarts with intelligence (circuit breaker, diagnostics)
+Restart=no
+StandardOutput=append:/media/ddarji/storage/ai-assistant/bot.log
+StandardError=append:/media/ddarji/storage/ai-assistant/bot.log
+Environment=NODE_ENV=production
+Environment=PATH=/home/ddarji/.nvm/versions/node/v20.20.0/bin:/home/ddarji/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

@@ -27,6 +27,9 @@ const creating = new Set();
 // Last-used timestamps for idle reaping
 const lastUsed = new Map(); // containerName -> timestamp
 
+// Track credentials inode to detect atomic renames (token refresh)
+const containerCredInode = new Map(); // containerName -> inode number
+
 // Cached docker availability
 let _dockerAvailable = null;
 
@@ -44,6 +47,18 @@ function getContainerName(chatId) {
 
 function getSandboxDir(chatId) {
   return path.join(config.sandboxBaseDir, hashChatId(chatId));
+}
+
+/**
+ * Get the inode number of the credentials file.
+ * Returns 0 if the file doesn't exist.
+ */
+function getCredentialsInode() {
+  try {
+    return fs.statSync(CREDENTIALS_PATH).ino;
+  } catch {
+    return 0;
+  }
 }
 
 function isDockerAvailable() {
@@ -110,7 +125,17 @@ async function ensureContainer(chatId) {
   const state = inspectContainer(containerName);
 
   if (state && state.running) {
-    return containerName;
+    // Check if credentials file inode changed (atomic rename on token refresh).
+    // If so, the bind mount is stale — recreate the container.
+    const currentInode = getCredentialsInode();
+    const mountedInode = containerCredInode.get(containerName) || 0;
+    if (currentInode > 0 && mountedInode > 0 && currentInode !== mountedInode) {
+      logger.info(`sandbox: credentials inode changed (${mountedInode} -> ${currentInode}), recreating ${containerName}`);
+      try { execFileSync('docker', ['rm', '-f', containerName], { stdio: 'ignore', timeout: 10000 }); } catch {}
+      // Fall through to create new container below
+    } else {
+      return containerName;
+    }
   }
 
   if (state && !state.running) {
@@ -173,6 +198,7 @@ async function ensureContainer(chatId) {
 
     execFileSync('docker', args, { stdio: 'ignore', timeout: 30000 });
     logger.info(`sandbox: created container ${containerName} for ${hashChatId(chatId)}`);
+    containerCredInode.set(containerName, getCredentialsInode());
     markContainerUsed(chatId);
     return containerName;
   } catch (err) {
@@ -237,6 +263,7 @@ function removeContainer(chatId) {
     // Container might not exist, that's fine
   }
   lastUsed.delete(containerName);
+  containerCredInode.delete(containerName);
 }
 
 /**

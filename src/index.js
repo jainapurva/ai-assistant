@@ -9,7 +9,7 @@ const apiCommands = require('./api-commands');
 const drive = require('./drive');
 const googleAuth = require('./google-auth');
 const resendAuth = require('./resend-auth');
-const { stripAnsi, chunkMessage } = require('./formatter');
+const { stripAnsi, chunkMessage, markdownToWhatsApp } = require('./formatter');
 const { detectOptions } = require('./options');
 const { discoverProjects, getProjectSummary } = require('./projects');
 const sandbox = require('./sandbox');
@@ -18,9 +18,16 @@ const logger = require('./logger');
 const chatLogger = require('./chat-logger');
 const { sanitizePaths } = require('./security');
 
+// ── PID file for watchdog (written after ports bind, see bottom of file) ──
+const PID_FILE = path.join(
+  process.env.BOT_STATE_DIR || '/media/ddarji/storage/ai-assistant',
+  'bot.pid'
+);
+fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
+
 // ── Registration check against website DB ──────────────────────────────────
-const REGISTRATION_CHECK_URL = 'https://readwithme.ai/api/user/check';
-const SIGNUP_URL = 'https://readwithme.ai';
+const REGISTRATION_CHECK_URL = 'https://swayat.com/api/user/check';
+const SIGNUP_URL = 'https://swayat.com';
 const registrationCache = new Map(); // waId → { registered: boolean, checkedAt: number }
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
@@ -106,7 +113,8 @@ async function botReply(msg, text) {
 }
 
 async function botSendChunks(msg, text) {
-  const chunks = chunkMessage(sanitizePaths(text), config.maxChunkSize);
+  const formatted = markdownToWhatsApp(sanitizePaths(text));
+  const chunks = chunkMessage(formatted, config.maxChunkSize);
   for (const chunk of chunks) {
     await provider.replyToMessage(msg, chunk);
   }
@@ -454,7 +462,7 @@ function isBotGeneratedMessage(text) {
   return BOT_MESSAGE_PREFIXES.some(prefix => text.startsWith(prefix));
 }
 
-// --- /send route on public webhook server (called by readwithme.ai signup) ---
+// --- /send route on public webhook server (called by swayat.com signup) ---
 provider.addRoute('POST', '/send', (req, res) => {
   let body = '';
   req.on('data', chunk => body += chunk);
@@ -1859,6 +1867,16 @@ const apiServer = http.createServer(async (req, res) => {
 
 apiServer.listen(INTERNAL_API_PORT, '0.0.0.0', () => {
   logger.info(`Internal API listening on 0.0.0.0:${INTERNAL_API_PORT}`);
+  // Write PID file only after both ports bind successfully
+  try {
+    fs.writeFileSync(PID_FILE, String(process.pid));
+  } catch (err) {
+    logger.warn(`Could not write PID file: ${err.message}`);
+  }
+});
+apiServer.on('error', (err) => {
+  logger.error(`Internal API port ${INTERNAL_API_PORT} failed: ${err.message}`);
+  process.exit(1);
 });
 
 // Prevent protocol errors from crashing Node
@@ -1872,6 +1890,7 @@ process.on('unhandledRejection', (reason) => {
 // Graceful shutdown
 async function shutdown() {
   logger.info('Shutting down...');
+  try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
   sandbox.shutdown();
   apiServer.close();
   await provider.destroy();

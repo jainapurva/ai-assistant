@@ -1,8 +1,11 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import dynamic from "next/dynamic";
 import SuccessModal from "./SuccessModal";
 import { countryCodes } from "@/lib/country-codes";
+
+const CardForm = dynamic(() => import("./CardForm"), { ssr: false });
 
 export default function SignupForm() {
   const [countryDial, setCountryDial] = useState("+1");
@@ -17,6 +20,9 @@ export default function SignupForm() {
   const [error, setError] = useState("");
   const [waLink, setWaLink] = useState("");
   const [showSuccess, setShowSuccess] = useState(false);
+  const [isPaid, setIsPaid] = useState(false);
+
+  const hasValidPromo = promoStatus.valid === true;
 
   const validatePromo = useCallback(async (code: string) => {
     if (!code.trim()) {
@@ -53,12 +59,10 @@ export default function SignupForm() {
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const doSignup = async (paymentToken?: string) => {
     setError("");
     setSubmitting(true);
 
-    // Combine country code + phone number
     const fullPhone = countryDial + phone.replace(/[\s\-().]/g, "");
 
     try {
@@ -68,6 +72,7 @@ export default function SignupForm() {
         body: JSON.stringify({
           phone: fullPhone,
           promoCode: promoCode.trim() || undefined,
+          paymentToken,
         }),
       });
       const data = await res.json();
@@ -78,12 +83,19 @@ export default function SignupForm() {
       }
 
       setWaLink(data.waLink);
+      setIsPaid(!!data.isPaid);
       setShowSuccess(true);
     } catch {
       setError("Network error. Please check your connection and try again.");
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    // Only used for promo code path (no card)
+    await doSignup();
   };
 
   return (
@@ -145,7 +157,7 @@ export default function SignupForm() {
             )}
             {!promoStatus.checking && promoStatus.valid === true && (
               <p className="mt-1.5 text-sm text-green-400">
-                ✓ {promoStatus.message}
+                &#10003; {promoStatus.message}
               </p>
             )}
             {!promoStatus.checking && promoStatus.valid === false && (
@@ -161,19 +173,33 @@ export default function SignupForm() {
             </p>
           )}
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="w-full rounded-xl bg-primary py-3.5 text-lg font-semibold transition hover:bg-primary-dark disabled:opacity-50"
-          >
-            {submitting ? "Signing up..." : "Sign Up"}
-          </button>
+          {/* Conditional: promo code → button, no promo → card form */}
+          {hasValidPromo ? (
+            <button
+              type="submit"
+              disabled={submitting}
+              className="w-full rounded-xl bg-primary py-3.5 text-lg font-semibold transition hover:bg-primary-dark disabled:opacity-50"
+            >
+              {submitting ? "Signing up..." : "Sign Up"}
+            </button>
+          ) : (
+            <div className="space-y-4">
+              <p className="text-center text-sm text-gray-400">
+                3-month free trial. $9.99/month after.
+              </p>
+              <CardForm
+                onTokenized={(token) => doSignup(token)}
+                submitting={submitting}
+              />
+            </div>
+          )}
         </form>
       </div>
 
       <SuccessModal
         open={showSuccess}
         waLink={waLink}
+        isPaid={isPaid}
         onClose={() => setShowSuccess(false)}
       />
     </section>
