@@ -475,13 +475,6 @@ function spawnInBwrap(chatId, claudeArgs, env, pipePrompt = null) {
   const CLAUDE_BIN = '/opt/claude/claude';
   const NODE_BIN_DIR = '/opt/node/bin';
 
-  // Copy fresh credentials into the user's .claude dir
-  try {
-    fs.copyFileSync(CREDENTIALS_PATH, path.join(claudeDir, '.credentials.json'));
-  } catch (err) {
-    logger.warn(`bwrap: failed to copy credentials: ${err.message}`);
-  }
-
   // Copy settings files if they exist
   const hostHome = process.env.HOME || '/home/ddarji';
   for (const f of ['settings.json', 'settings.local.json']) {
@@ -512,8 +505,10 @@ function spawnInBwrap(chatId, claudeArgs, env, pipePrompt = null) {
     '--ro-bind', claudeBinaryPath, CLAUDE_BIN,
     // Claude CLI config file (read-only)
     ...(fs.existsSync(CLAUDE_CONFIG_PATH) ? ['--ro-bind', CLAUDE_CONFIG_PATH, `${HOME}/.claude.json`] : []),
-    // Per-user .claude dir (writable — session data, credentials)
+    // Per-user .claude dir (writable — session data, history)
     '--bind', claudeDir, `${HOME}/.claude`,
+    // Host credentials (read-only overlay — prevents sandbox from consuming refresh tokens)
+    '--ro-bind', CREDENTIALS_PATH, `${HOME}/.claude/.credentials.json`,
     // User workspace (writable — the ONLY user-accessible data dir)
     '--bind', workspace, '/workspace',
     // Working directory

@@ -17,6 +17,7 @@ const DEFAULT_WELCOME =
   `*Handy commands:*\n` +
   `/files \u2014 See & download files from your workspace\n` +
   `/gmail login \u2014 Connect your Gmail & Google Drive\n` +
+  `/outlook login \u2014 Connect your Outlook email\n` +
   `/resend \u2014 Set up email sending via Resend\n` +
   `/agents \u2014 Switch between specialized agents\n` +
   `/sandbox \u2014 Check your workspace status\n` +
@@ -87,8 +88,8 @@ export async function POST(request: Request) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chatId, agentId }),
       });
-    } catch {
-      // Agent setup failed — fall back to default welcome
+    } catch (err) {
+      console.error(`[signup] setup-agent failed for ${chatId}:`, err);
     }
 
     // Send default welcome message (covers general agent or if setup-agent didn't send one)
@@ -99,8 +100,8 @@ export async function POST(request: Request) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chatId, message: DEFAULT_WELCOME }),
         });
-      } catch {
-        // Don't fail signup if welcome message fails
+      } catch (err) {
+        console.error(`[signup] welcome message failed for ${chatId}:`, err);
       }
     }
 
