@@ -1933,9 +1933,9 @@ provider.on('message', async (msg) => {
         return;
       }
 
-      // If sandbox is enabled, copy media into the workspace so Claude can access it inside Docker
-      const useSandbox = config.sandboxEnabled && sandbox.isDockerAvailable();
-      const mediaPaths = []; // host paths for cleanup
+      // Copy media into the user's workspace so Claude can access it inside the sandbox
+      const useSandbox = config.sandboxEnabled && (sandbox.isDockerAvailable() || sandbox.isBwrapAvailable());
+      const mediaPaths = []; // host paths for cleanup (only temp files, NOT workspace copies)
 
       for (const p of paths) {
         const filename = path.basename(p.path);
@@ -1947,7 +1947,7 @@ provider.on('message', async (msg) => {
           fs.copyFileSync(p.path, destPath);
           // Use container-visible path for the prompt
           p.promptPath = `/workspace/${filename}`;
-          mediaPaths.push(p.path, destPath); // clean up both original and copy
+          mediaPaths.push(p.path); // only clean up the media_tmp original; keep workspace copy
         } else {
           p.promptPath = p.path;
           mediaPaths.push(p.path);
