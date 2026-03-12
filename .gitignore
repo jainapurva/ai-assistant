@@ -5,3 +5,22 @@ node_modules/
 media_tmp/
 bot_state*.json
 user-profiles.json
+
+# Runtime / secrets
+google-tokens.json
+microsoft-tokens.json
+gmail-tokens.json
+resend-keys.json
+*.pid
+*.log
+.bot-shared-state.json
+
+# Runtime dirs
+logs/
+sandboxes/
+activity/
+watchdog_reset/
+dist/
+
+# Claude config (local)
+.claude/

@@ -27,8 +27,6 @@ const creating = new Set();
 // Last-used timestamps for idle reaping
 const lastUsed = new Map(); // containerName -> timestamp
 
-// Track credentials inode to detect atomic renames (token refresh)
-const containerCredInode = new Map(); // containerName -> inode number
 
 // Cached docker availability
 let _dockerAvailable = null;
@@ -47,18 +45,6 @@ function getContainerName(chatId) {
 
 function getSandboxDir(chatId) {
   return path.join(config.sandboxBaseDir, hashChatId(chatId));
-}
-
-/**
- * Get the inode number of the credentials file.
- * Returns 0 if the file doesn't exist.
- */
-function getCredentialsInode() {
-  try {
-    return fs.statSync(CREDENTIALS_PATH).ino;
-  } catch {
-    return 0;
-  }
 }
 
 function isDockerAvailable() {
@@ -125,12 +111,15 @@ async function ensureContainer(chatId) {
   const state = inspectContainer(containerName);
 
   if (state && state.running) {
-    // Check if credentials file inode changed (atomic rename on token refresh).
-    // If so, the bind mount is stale — recreate the container.
-    const currentInode = getCredentialsInode();
-    const mountedInode = containerCredInode.get(containerName) || 0;
-    if (currentInode > 0 && mountedInode > 0 && currentInode !== mountedInode) {
-      logger.info(`sandbox: credentials inode changed (${mountedInode} -> ${currentInode}), recreating ${containerName}`);
+    // Verify claude binary mount is still valid (auto-updates delete old versions)
+    let claudeOk = true;
+    try {
+      execFileSync('docker', ['exec', containerName, 'test', '-f', '/usr/local/bin/claude'], { stdio: 'ignore', timeout: 5000 });
+    } catch {
+      claudeOk = false;
+    }
+    if (!claudeOk) {
+      logger.info(`sandbox: claude binary missing in ${containerName}, recreating`);
       try { execFileSync('docker', ['rm', '-f', containerName], { stdio: 'ignore', timeout: 10000 }); } catch {}
       // Fall through to create new container below
     } else {
@@ -162,8 +151,7 @@ async function ensureContainer(chatId) {
       '-v', `${claudeBinaryPath}:/usr/local/bin/claude:ro`,
       '-v', `${workspace}:/workspace`,
       '-v', `${claudeDir}:/home/claude/.claude`,
-      // Read-only credential overlay
-      '-v', `${CREDENTIALS_PATH}:/home/claude/.claude/.credentials.json:ro`,
+      // Credentials are copied fresh before each spawn (see spawnInContainer)
       // Node.js binary + MCP server bundle (for Google MCP integration)
       '-v', `${config.nodeBinaryPath}:/usr/local/bin/node:ro`,
       '-v', `${path.resolve(config.mcpServerPath)}:/opt/mcp/google-mcp-server.js:ro`,
@@ -198,7 +186,6 @@ async function ensureContainer(chatId) {
 
     execFileSync('docker', args, { stdio: 'ignore', timeout: 30000 });
     logger.info(`sandbox: created container ${containerName} for ${hashChatId(chatId)}`);
-    containerCredInode.set(containerName, getCredentialsInode());
     markContainerUsed(chatId);
     return containerName;
   } catch (err) {
@@ -215,6 +202,14 @@ async function ensureContainer(chatId) {
  */
 async function spawnInContainer(chatId, args, env, pipePrompt = null) {
   const containerName = await ensureContainer(chatId);
+
+  // Copy fresh credentials into sandbox (avoids stale bind-mount inode issue)
+  try {
+    const sandboxClaudeDir = path.join(getSandboxDir(chatId), '.claude');
+    fs.copyFileSync(CREDENTIALS_PATH, path.join(sandboxClaudeDir, '.credentials.json'));
+  } catch (err) {
+    logger.warn(`sandbox: failed to copy credentials for ${containerName}: ${err.message}`);
+  }
 
   // Build docker exec args with env vars
   const dockerArgs = ['exec'];
@@ -439,19 +434,154 @@ function shutdown() {
   if (reaperTimer) clearInterval(reaperTimer);
 }
 
+// ── Bubblewrap (bwrap) lightweight sandbox ──────────────────────────────────
+// Used when Docker sandbox is disabled. Provides kernel-level filesystem
+// isolation: only the user's workspace is visible, rest of the filesystem is hidden.
+
+let _bwrapAvailable = null;
+function isBwrapAvailable() {
+  if (_bwrapAvailable !== null) return _bwrapAvailable;
+  try {
+    execFileSync('bwrap', ['--version'], { stdio: 'ignore', timeout: 3000 });
+    _bwrapAvailable = true;
+  } catch {
+    _bwrapAvailable = false;
+    logger.warn('sandbox: bubblewrap (bwrap) not available, filesystem isolation disabled');
+  }
+  return _bwrapAvailable;
+}
+
+/**
+ * Spawn Claude inside a bubblewrap sandbox with full filesystem isolation.
+ * Only the user's workspace is visible. All paths are remapped to clean
+ * internal paths so no host directory structure is leaked.
+ *
+ * Internal layout:
+ *   /workspace          — user's writable workspace
+ *   /home/user/.claude  — per-user writable Claude config/session dir
+ *   /opt/claude         — Claude CLI binary (read-only)
+ *   /opt/node/bin/node  — Node.js binary (read-only)
+ *   /opt/mcp/           — MCP server bundles (read-only)
+ *
+ * @param {string} chatId - User identifier (for workspace lookup)
+ * @param {string[]} claudeArgs - Arguments to pass to the Claude CLI (paths should use internal layout)
+ * @param {object} env - Environment variables (whitelisted)
+ * @param {string|null} pipePrompt - If non-null, pipe this as stdin
+ * @returns {ChildProcess}
+ */
+function spawnInBwrap(chatId, claudeArgs, env, pipePrompt = null) {
+  const { workspace, claudeDir } = ensureSandboxDirs(chatId);
+  const HOME = '/home/user';
+  const CLAUDE_BIN = '/opt/claude/claude';
+  const NODE_BIN_DIR = '/opt/node/bin';
+
+  // Copy fresh credentials into the user's .claude dir
+  try {
+    fs.copyFileSync(CREDENTIALS_PATH, path.join(claudeDir, '.credentials.json'));
+  } catch (err) {
+    logger.warn(`bwrap: failed to copy credentials: ${err.message}`);
+  }
+
+  // Copy settings files if they exist
+  const hostHome = process.env.HOME || '/home/ddarji';
+  for (const f of ['settings.json', 'settings.local.json']) {
+    const src = path.join(hostHome, '.claude', f);
+    if (fs.existsSync(src)) {
+      try { fs.copyFileSync(src, path.join(claudeDir, f)); } catch {}
+    }
+  }
+
+  // Build bwrap args: clean internal paths only
+  const bwrapArgs = [
+    // System libraries (read-only)
+    '--ro-bind', '/usr', '/usr',
+    '--ro-bind', '/lib', '/lib',
+    '--ro-bind', '/lib64', '/lib64',
+    '--ro-bind', '/bin', '/bin',
+    '--ro-bind', '/sbin', '/sbin',
+    '--ro-bind', '/etc', '/etc',
+    // DNS resolution (systemd-resolved symlink target)
+    '--ro-bind', '/run/systemd/resolve', '/run/systemd/resolve',
+    // Kernel interfaces
+    '--proc', '/proc',
+    '--dev', '/dev',
+    '--tmpfs', '/tmp',
+    // Node.js runtime at /opt/node/bin/ (read-only)
+    '--ro-bind', path.dirname(config.nodeBinaryPath), NODE_BIN_DIR,
+    // Claude CLI binary at /opt/claude/claude (read-only) — single file, not directory
+    '--ro-bind', claudeBinaryPath, CLAUDE_BIN,
+    // Claude CLI config file (read-only)
+    ...(fs.existsSync(CLAUDE_CONFIG_PATH) ? ['--ro-bind', CLAUDE_CONFIG_PATH, `${HOME}/.claude.json`] : []),
+    // Per-user .claude dir (writable — session data, credentials)
+    '--bind', claudeDir, `${HOME}/.claude`,
+    // User workspace (writable — the ONLY user-accessible data dir)
+    '--bind', workspace, '/workspace',
+    // Working directory
+    '--chdir', '/workspace',
+    // Namespace isolation (preserves network access)
+    '--unshare-pid',
+    '--unshare-ipc',
+    '--unshare-uts',
+    // Environment
+    '--setenv', 'HOME', HOME,
+    '--setenv', 'PATH', `${NODE_BIN_DIR}:/opt/claude:/usr/local/bin:/usr/bin:/bin`,
+    '--setenv', 'TERM', 'dumb',
+    '--unsetenv', 'CLAUDECODE',
+  ];
+
+  // Add MCP server mounts at /opt/mcp/ (read-only)
+  const mcpMounts = [
+    { host: path.resolve(config.mcpServerPath), internal: '/opt/mcp/google-mcp-server.js' },
+    { host: path.resolve(config.resendMcpPath), internal: '/opt/mcp/resend-mcp-server.mjs' },
+  ];
+  for (const m of mcpMounts) {
+    if (fs.existsSync(m.host)) {
+      bwrapArgs.push('--ro-bind', m.host, m.internal);
+    }
+  }
+
+  // Pass whitelisted env vars
+  if (env) {
+    for (const [key, val] of Object.entries(env)) {
+      if (val !== undefined && val !== null && key !== 'HOME' && key !== 'TERM' && key !== 'PATH') {
+        bwrapArgs.push('--setenv', key, val);
+      }
+    }
+  }
+
+  bwrapArgs.push('--');
+
+  // Claude args (filter out __PIPE_PROMPT__ placeholder)
+  const finalClaudeArgs = claudeArgs.filter(a => a !== '__PIPE_PROMPT__');
+  const fullArgs = [...bwrapArgs, CLAUDE_BIN, ...finalClaudeArgs];
+
+  const stdio = pipePrompt ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'];
+  const proc = spawn('bwrap', fullArgs, { stdio });
+
+  if (pipePrompt) {
+    proc.stdin.write(pipePrompt);
+    proc.stdin.end();
+  }
+
+  return proc;
+}
+
 module.exports = {
   hashChatId,
   getContainerName,
   getSandboxDir,
   isDockerAvailable,
+  isBwrapAvailable,
   ensureContainer,
   spawnInContainer,
+  spawnInBwrap,
   removeContainer,
   getSandboxStatus,
   cleanWorkspace,
   markContainerUsed,
   checkDiskUsage,
   reapIdleContainers,
+  ensureSandboxDirs,
   init,
   shutdown,
 };

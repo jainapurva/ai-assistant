@@ -1,10 +1,9 @@
 import { NextResponse } from "next/server";
 import { normalizePhone } from "@/lib/phone";
 import { createUser } from "@/lib/db";
-import { createCustomerWithCard, createSubscription } from "@/lib/square";
 import { BOT_PHONE_NUMBER, BOT_API_URL } from "@/lib/constants";
 
-const WELCOME_MESSAGE =
+const DEFAULT_WELCOME =
   `Hey! \u{1F44B}\n\n` +
   `I'm your personal AI assistant \u2014 think of me as a teammate who never sleeps and loves a good challenge.\n\n` +
   `*What can I do?*\n` +
@@ -19,6 +18,7 @@ const WELCOME_MESSAGE =
   `/files \u2014 See & download files from your workspace\n` +
   `/gmail login \u2014 Connect your Gmail & Google Drive\n` +
   `/resend \u2014 Set up email sending via Resend\n` +
+  `/agents \u2014 Switch between specialized agents\n` +
   `/sandbox \u2014 Check your workspace status\n` +
   `/usage \u2014 See your token usage\n` +
   `/stop \u2014 Cancel a running task\n` +
@@ -28,11 +28,25 @@ const WELCOME_MESSAGE =
 
 export async function POST(request: Request) {
   try {
-    const { phone, promoCode, paymentToken } = await request.json();
+    const { phone, agent, name, email } = await request.json();
 
     if (!phone || typeof phone !== "string") {
       return NextResponse.json(
         { success: false, error: "Phone number is required" },
+        { status: 400 }
+      );
+    }
+
+    if (!name || typeof name !== "string" || name.trim().length < 2) {
+      return NextResponse.json(
+        { success: false, error: "Full name is required" },
+        { status: 400 }
+      );
+    }
+
+    if (!email || typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return NextResponse.json(
+        { success: false, error: "A valid email address is required" },
         { status: 400 }
       );
     }
@@ -49,52 +63,12 @@ export async function POST(request: Request) {
       );
     }
 
-    // If no promo code, a payment token is required
-    if (!promoCode && !paymentToken) {
-      return NextResponse.json(
-        { success: false, error: "Payment information is required" },
-        { status: 400 }
-      );
-    }
-
-    let squareCustomerId: string | undefined;
-    let squareSubscriptionId: string | undefined;
-    let isPaid = false;
-
-    // Process payment if token provided (no promo code path)
-    if (paymentToken) {
-      try {
-        const { customerId, cardId } = await createCustomerWithCard(
-          normalized,
-          paymentToken
-        );
-        squareCustomerId = customerId;
-
-        // Subscription starts billing 90 days from now
-        const startDate = new Date();
-        startDate.setDate(startDate.getDate() + 90);
-        const startDateStr = startDate.toISOString().split("T")[0];
-
-        squareSubscriptionId = await createSubscription(
-          customerId,
-          cardId,
-          startDateStr
-        );
-        isPaid = true;
-      } catch (err) {
-        const message =
-          err instanceof Error ? err.message : "Payment processing failed";
-        return NextResponse.json(
-          { success: false, error: message },
-          { status: 402 }
-        );
-      }
-    }
+    const agentId = agent || "general";
 
     const result = await createUser(normalized, {
-      promoCode: promoCode || undefined,
-      squareCustomerId,
-      squareSubscriptionId,
+      defaultAgent: agentId,
+      fullName: name.trim(),
+      email: email.trim().toLowerCase(),
     });
 
     if (!result.success) {
@@ -104,21 +78,35 @@ export async function POST(request: Request) {
       );
     }
 
-    // Send welcome message via bot's internal API
     const chatId = normalized.replace("+", "");
+
+    // Set up agent and send agent-specific welcome via bot API
     try {
-      await fetch(`${BOT_API_URL}/send`, {
+      await fetch(`${BOT_API_URL}/setup-agent`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chatId, message: WELCOME_MESSAGE }),
+        body: JSON.stringify({ chatId, agentId }),
       });
     } catch {
-      // Don't fail signup if welcome message fails
+      // Agent setup failed — fall back to default welcome
+    }
+
+    // Send default welcome message (covers general agent or if setup-agent didn't send one)
+    if (agentId === "general") {
+      try {
+        await fetch(`${BOT_API_URL}/send`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chatId, message: DEFAULT_WELCOME }),
+        });
+      } catch {
+        // Don't fail signup if welcome message fails
+      }
     }
 
     const waLink = `https://wa.me/${BOT_PHONE_NUMBER}?text=Hi`;
 
-    return NextResponse.json({ success: true, waLink, isPaid });
+    return NextResponse.json({ success: true, waLink });
   } catch {
     return NextResponse.json(
       { success: false, error: "Server error. Please try again." },

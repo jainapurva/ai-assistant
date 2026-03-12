@@ -16,8 +16,8 @@ function Section({
 }) {
   return (
     <section className="space-y-3">
-      <h2 className="text-xl font-semibold text-white">{title}</h2>
-      <div className="space-y-3 text-gray-300 leading-relaxed">{children}</div>
+      <h2 className="text-xl font-semibold text-heading">{title}</h2>
+      <div className="space-y-3 text-body leading-relaxed">{children}</div>
     </section>
   );
 }
@@ -59,7 +59,7 @@ export default function TermsOfService() {
                 href="https://www.whatsapp.com/legal/terms-of-service"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-primary-light underline transition hover:text-primary"
+                className="text-primary underline transition hover:text-primary"
               >
                 WhatsApp&apos;s Terms of Service
               </a>
@@ -159,7 +159,7 @@ export default function TermsOfService() {
               Your use of the Service is also governed by our{" "}
               <a
                 href="/privacy"
-                className="text-primary-light underline transition hover:text-primary"
+                className="text-primary underline transition hover:text-primary"
               >
                 Privacy Policy
               </a>
@@ -238,7 +238,7 @@ export default function TermsOfService() {
             <p>
               <a
                 href="mailto:support@swayat.com"
-                className="text-primary-light underline transition hover:text-primary"
+                className="text-primary underline transition hover:text-primary"
               >
                 support@swayat.com
               </a>

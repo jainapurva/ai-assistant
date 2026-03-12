@@ -45,12 +45,18 @@ jest.mock('child_process', () => ({
 
 jest.mock('../../src/sandbox', () => ({
   isDockerAvailable: jest.fn(() => true),
+  isBwrapAvailable: jest.fn(() => false),
   spawnInContainer: jest.fn((chatId, args, env, pipePrompt) => {
     mockLastContainerArgs = args;
     mockLastContainerPipePrompt = pipePrompt;
     return Promise.resolve(mockCreateProc());
   }),
   markContainerUsed: jest.fn(),
+  ensureSandboxDirs: jest.fn((chatId) => ({
+    base: '/tmp/test-sandbox',
+    workspace: '/tmp/test-sandbox/workspace',
+    claudeDir: '/tmp/test-sandbox/.claude',
+  })),
 }));
 
 // ── Mock google-auth ────────────────────────────────────────────────────────
@@ -61,12 +67,37 @@ const mockGoogleAuth = {
 };
 jest.mock('../../src/google-auth', () => mockGoogleAuth);
 
+// ── Mock microsoft-auth ──────────────────────────────────────────────────────
+
+const mockMicrosoftAuth = {
+  isConfigured: jest.fn(() => false),
+  getStatus: jest.fn(() => ({ connected: false })),
+};
+jest.mock('../../src/microsoft-auth', () => mockMicrosoftAuth);
+
 // ── Mock resend-auth ───────────────────────────────────────────────────────
 
 const mockResendAuth = {
   resolveApiKey: jest.fn(() => null),
 };
 jest.mock('../../src/resend-auth', () => mockResendAuth);
+
+// ── Mock activity-logger ────────────────────────────────────────────────────
+
+jest.mock('../../src/activity-logger', () => ({
+  logTaskStart: jest.fn(),
+  logTaskEnd: jest.fn(),
+  logSession: jest.fn(),
+  syncToDb: jest.fn(),
+}));
+
+// ── Mock agents ─────────────────────────────────────────────────────────────
+
+jest.mock('../../src/agents', () => ({
+  getDefaultAgentId: jest.fn(() => 'general'),
+  getAgent: jest.fn(() => ({ id: 'general', name: 'General', claudeMd: '' })),
+  ensureAgentWorkspace: jest.fn((base, agentId) => `${base}/agents/${agentId}`),
+}));
 
 // ── Mock security ───────────────────────────────────────────────────────────
 
@@ -89,7 +120,19 @@ jest.mock('../../src/config', () => ({
   stateDir: '/tmp',
   nodeBinaryPath: '/usr/local/bin/node',
   mcpServerPath: '/opt/mcp/google-mcp-server.js',
+  outlookMcpServerPath: '/opt/mcp/outlook-mcp-server.js',
   resendMcpPath: '/opt/mcp/resend-mcp-server.mjs',
+  githubAppId: '',
+  githubPrivateKeyPath: '',
+  githubClientId: '',
+  githubClientSecret: '',
+}));
+
+// ── Mock github-auth ────────────────────────────────────────────────────────
+
+jest.mock('../../src/github-auth', () => ({
+  isConfigured: jest.fn(() => false),
+  getStatus: jest.fn(() => ({ connected: false })),
 }));
 
 // ── Mock fs ─────────────────────────────────────────────────────────────────
@@ -293,5 +336,54 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     expect(args).not.toContain('--mcp-config');
     // The prompt should mention /resend
     expect(args[args.length - 1]).toContain('/resend');
+  });
+
+  // ── Outlook MCP ──
+
+  test('Outlook MCP: added when user has connected Microsoft account', async () => {
+    mockMicrosoftAuth.isConfigured.mockReturnValue(true);
+    mockMicrosoftAuth.getStatus.mockReturnValue({ connected: true, email: 'user@outlook.com' });
+    mockGoogleAuth.isConfigured.mockReturnValue(false);
+
+    resolveProc();
+    await runClaude('check outlook inbox', 'chat-outlook-1', 'chat-outlook-1');
+
+    const args = mockLastContainerArgs;
+    expect(args).toContain('--mcp-config');
+    const mcpJson = JSON.parse(args[args.indexOf('--mcp-config') + 1]);
+    expect(mcpJson.mcpServers.outlook).toBeDefined();
+    expect(mcpJson.mcpServers.outlook.env.CHAT_ID).toBe('chat-outlook-1');
+    expect(mockLastContainerPipePrompt).toContain('check outlook inbox');
+  });
+
+  test('Outlook configured but NOT connected: no Outlook MCP', async () => {
+    mockMicrosoftAuth.isConfigured.mockReturnValue(true);
+    mockMicrosoftAuth.getStatus.mockReturnValue({ connected: false });
+    mockGoogleAuth.isConfigured.mockReturnValue(false);
+
+    resolveProc();
+    await runClaude('hello', 'chat-outlook-2', 'chat-outlook-2');
+
+    const args = mockLastContainerArgs;
+    // No MCP config at all (only Outlook configured but not connected)
+    expect(args).not.toContain('--mcp-config');
+  });
+
+  test('Google + Outlook + Resend: all three MCP servers present', async () => {
+    mockGoogleAuth.isConfigured.mockReturnValue(true);
+    mockGoogleAuth.getStatus.mockReturnValue({ connected: true, email: 'u@gmail.com' });
+    mockMicrosoftAuth.isConfigured.mockReturnValue(true);
+    mockMicrosoftAuth.getStatus.mockReturnValue({ connected: true, email: 'u@outlook.com' });
+    mockResendAuth.resolveApiKey.mockReturnValue('re_test_key_789');
+
+    resolveProc();
+    await runClaude('send emails everywhere', 'chat-all', 'chat-all');
+
+    const args = mockLastContainerArgs;
+    const mcpJson = JSON.parse(args[args.indexOf('--mcp-config') + 1]);
+
+    expect(mcpJson.mcpServers.google).toBeDefined();
+    expect(mcpJson.mcpServers.outlook).toBeDefined();
+    expect(mcpJson.mcpServers.resend).toBeDefined();
   });
 });

@@ -23,19 +23,19 @@ interface SubscriptionData {
 const STATUS_BADGES: Record<string, { label: string; className: string }> = {
   trialing: {
     label: "Free Trial",
-    className: "bg-yellow-500/20 text-yellow-300 border-yellow-500/30",
+    className: "bg-yellow-50 text-yellow-700 border-yellow-300",
   },
   active: {
     label: "Active",
-    className: "bg-green-500/20 text-green-300 border-green-500/30",
+    className: "bg-green-50 text-green-700 border-green-300",
   },
   past_due: {
     label: "Past Due",
-    className: "bg-red-500/20 text-red-300 border-red-500/30",
+    className: "bg-red-50 text-red-700 border-red-300",
   },
   canceled: {
     label: "Canceled",
-    className: "bg-gray-500/20 text-gray-300 border-gray-500/30",
+    className: "bg-slate-100 text-slate-600 border-slate-300",
   },
 };
 
@@ -112,7 +112,6 @@ export default function AccountManager() {
         `Subscription canceled. You'll have access until ${formatDate(result.chargedThroughDate)}.`
       );
       setShowConfirmCancel(false);
-      // Refresh data
       setData((prev) =>
         prev ? { ...prev, subscriptionStatus: "canceled" } : null
       );
@@ -157,10 +156,10 @@ export default function AccountManager() {
   return (
     <section className="px-6 py-12">
       <div className="mx-auto max-w-lg">
-        <h1 className="text-center text-3xl font-bold">
-          Manage Your <span className="text-primary-light">Account</span>
+        <h1 className="text-center text-3xl font-bold text-heading">
+          Manage Your <span className="text-primary">Account</span>
         </h1>
-        <p className="mt-3 text-center text-gray-400">
+        <p className="mt-3 text-center text-body">
           Enter your WhatsApp number to view your subscription.
         </p>
 
@@ -170,7 +169,7 @@ export default function AccountManager() {
             <select
               value={countryDial}
               onChange={(e) => setCountryDial(e.target.value)}
-              className="w-[120px] shrink-0 rounded-xl border border-white/10 bg-surface-lighter px-3 py-3 text-white outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
+              className="w-[120px] shrink-0 rounded-xl border border-slate-300 bg-white px-3 py-3 text-heading outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
             >
               {countryCodes.map((c) => (
                 <option key={`${c.code}-${c.dial}`} value={c.dial}>
@@ -184,26 +183,26 @@ export default function AccountManager() {
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
               required
-              className="w-full rounded-xl border border-white/10 bg-surface-lighter px-4 py-3 text-white placeholder-gray-500 outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
+              className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-heading placeholder-muted outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
             />
           </div>
           <button
             type="submit"
             disabled={loading}
-            className="w-full rounded-xl bg-primary py-3 font-semibold transition hover:bg-primary-dark disabled:opacity-50"
+            className="w-full rounded-xl bg-primary py-3 font-semibold text-white transition hover:bg-primary-dark disabled:opacity-50"
           >
             {loading ? "Looking up..." : "Look Up Account"}
           </button>
         </form>
 
         {error && (
-          <p className="mt-4 rounded-lg bg-red-500/10 px-4 py-2.5 text-sm text-red-400">
+          <p className="mt-4 rounded-lg bg-red-50 px-4 py-2.5 text-sm text-red-600">
             {error}
           </p>
         )}
 
         {message && (
-          <p className="mt-4 rounded-lg bg-green-500/10 px-4 py-2.5 text-sm text-green-400">
+          <p className="mt-4 rounded-lg bg-green-50 px-4 py-2.5 text-sm text-green-700">
             {message}
           </p>
         )}
@@ -212,9 +211,9 @@ export default function AccountManager() {
         {data && (
           <div className="mt-8 space-y-6">
             {/* Status card */}
-            <div className="rounded-2xl border border-white/10 bg-surface-lighter p-6">
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
               <div className="flex items-center justify-between">
-                <h2 className="text-lg font-semibold">Subscription</h2>
+                <h2 className="text-lg font-semibold text-heading">Subscription</h2>
                 {badge && (
                   <span
                     className={`rounded-full border px-3 py-1 text-xs font-medium ${badge.className}`}
@@ -226,33 +225,33 @@ export default function AccountManager() {
 
               <dl className="mt-4 space-y-3 text-sm">
                 <div className="flex justify-between">
-                  <dt className="text-gray-400">Signed up</dt>
-                  <dd>{formatDate(data.signupDate)}</dd>
+                  <dt className="text-body">Signed up</dt>
+                  <dd className="text-heading">{formatDate(data.signupDate)}</dd>
                 </div>
 
                 {data.subscriptionStatus === "trialing" &&
                   data.trialExpiresAt && (
                     <div className="flex justify-between">
-                      <dt className="text-gray-400">Trial ends</dt>
-                      <dd>{formatDate(data.trialExpiresAt)}</dd>
+                      <dt className="text-body">Trial ends</dt>
+                      <dd className="text-heading">{formatDate(data.trialExpiresAt)}</dd>
                     </div>
                   )}
 
                 {data.square?.chargedThroughDate && (
                   <div className="flex justify-between">
-                    <dt className="text-gray-400">
+                    <dt className="text-body">
                       {data.subscriptionStatus === "canceled"
                         ? "Access until"
                         : "Next billing date"}
                     </dt>
-                    <dd>{formatDate(data.square.chargedThroughDate)}</dd>
+                    <dd className="text-heading">{formatDate(data.square.chargedThroughDate)}</dd>
                   </div>
                 )}
 
                 {data.lastPaymentAt && (
                   <div className="flex justify-between">
-                    <dt className="text-gray-400">Last payment</dt>
-                    <dd>{formatDate(data.lastPaymentAt)}</dd>
+                    <dt className="text-body">Last payment</dt>
+                    <dd className="text-heading">{formatDate(data.lastPaymentAt)}</dd>
                   </div>
                 )}
               </dl>
@@ -265,13 +264,13 @@ export default function AccountManager() {
                 {!showCardUpdate ? (
                   <button
                     onClick={() => setShowCardUpdate(true)}
-                    className="w-full rounded-xl border border-white/10 bg-surface-lighter py-3 font-medium transition hover:border-white/20"
+                    className="w-full rounded-xl border border-slate-300 bg-white py-3 font-medium text-heading transition hover:border-primary hover:bg-primary/5"
                   >
                     Update Payment Method
                   </button>
                 ) : (
-                  <div className="rounded-2xl border border-white/10 bg-surface-lighter p-6">
-                    <h3 className="mb-4 font-semibold">
+                  <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                    <h3 className="mb-4 font-semibold text-heading">
                       Update Payment Method
                     </h3>
                     <CardForm
@@ -280,7 +279,7 @@ export default function AccountManager() {
                     />
                     <button
                       onClick={() => setShowCardUpdate(false)}
-                      className="mt-3 w-full text-sm text-gray-400 hover:text-gray-300"
+                      className="mt-3 w-full text-sm text-muted hover:text-heading"
                     >
                       Cancel
                     </button>
@@ -291,13 +290,13 @@ export default function AccountManager() {
                 {!showConfirmCancel ? (
                   <button
                     onClick={() => setShowConfirmCancel(true)}
-                    className="w-full rounded-xl py-3 text-sm text-gray-400 transition hover:text-red-400"
+                    className="w-full rounded-xl py-3 text-sm text-muted transition hover:text-red-600"
                   >
                     Cancel Subscription
                   </button>
                 ) : (
-                  <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-6">
-                    <p className="text-sm text-gray-300">
+                  <div className="rounded-2xl border border-red-200 bg-red-50 p-6">
+                    <p className="text-sm text-body">
                       Are you sure? You&apos;ll keep access until the end of
                       your current billing period.
                     </p>
@@ -305,13 +304,13 @@ export default function AccountManager() {
                       <button
                         onClick={handleCancel}
                         disabled={canceling}
-                        className="flex-1 rounded-xl bg-red-600 py-2.5 text-sm font-semibold transition hover:bg-red-700 disabled:opacity-50"
+                        className="flex-1 rounded-xl bg-red-600 py-2.5 text-sm font-semibold text-white transition hover:bg-red-700 disabled:opacity-50"
                       >
                         {canceling ? "Canceling..." : "Yes, Cancel"}
                       </button>
                       <button
                         onClick={() => setShowConfirmCancel(false)}
-                        className="flex-1 rounded-xl border border-white/10 py-2.5 text-sm transition hover:border-white/20"
+                        className="flex-1 rounded-xl border border-slate-300 py-2.5 text-sm text-heading transition hover:border-primary"
                       >
                         Keep Subscription
                       </button>

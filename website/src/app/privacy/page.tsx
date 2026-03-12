@@ -17,8 +17,8 @@ function Section({
 }) {
   return (
     <section className="space-y-3">
-      <h2 className="text-xl font-semibold text-white">{title}</h2>
-      <div className="space-y-3 text-gray-300 leading-relaxed">{children}</div>
+      <h2 className="text-xl font-semibold text-heading">{title}</h2>
+      <div className="space-y-3 text-body leading-relaxed">{children}</div>
     </section>
   );
 }
@@ -54,35 +54,35 @@ export default function PrivacyPolicy() {
             <p>We collect the following information when you use our Service:</p>
             <ul className="list-disc space-y-2 pl-6">
               <li>
-                <strong className="text-white">Phone number</strong> — Your
+                <strong className="text-heading">Phone number</strong> — Your
                 WhatsApp phone number, provided when you message us or sign up
                 on our website. Used to identify your account and deliver
                 responses.
               </li>
               <li>
-                <strong className="text-white">Message content</strong> —
+                <strong className="text-heading">Message content</strong> —
                 The text, images, and files you send to the Service through
                 WhatsApp. Used to generate AI-powered responses.
               </li>
               <li>
-                <strong className="text-white">Conversation history</strong> —
+                <strong className="text-heading">Conversation history</strong> —
                 Your past messages within an active session, used to maintain
                 context so the assistant can provide relevant follow-up
                 responses.
               </li>
               <li>
-                <strong className="text-white">Display name</strong> — An
+                <strong className="text-heading">Display name</strong> — An
                 optional name you choose to register, used to personalize your
                 experience.
               </li>
               <li>
-                <strong className="text-white">Usage data</strong> — Basic
+                <strong className="text-heading">Usage data</strong> — Basic
                 interaction metrics such as message counts and token usage,
                 used for service management and quality improvement.
               </li>
             </ul>
             <p>
-              We do <strong className="text-white">not</strong> collect your
+              We do <strong className="text-heading">not</strong> collect your
               WhatsApp profile photo, status, contacts list, or any information
               from other conversations.
             </p>
@@ -107,7 +107,7 @@ export default function PrivacyPolicy() {
               </li>
             </ul>
             <p>
-              We do <strong className="text-white">not</strong> use your data
+              We do <strong className="text-heading">not</strong> use your data
               for advertising, profiling, or any purpose unrelated to delivering
               the Service.
             </p>
@@ -121,21 +121,21 @@ export default function PrivacyPolicy() {
             </p>
             <ul className="list-disc space-y-2 pl-6">
               <li>
-                <strong className="text-white">Meta (WhatsApp)</strong> —
+                <strong className="text-heading">Meta (WhatsApp)</strong> —
                 Messages are sent and received through Meta&apos;s WhatsApp
                 Cloud API. Meta&apos;s use of your data is governed by{" "}
                 <a
                   href="https://www.whatsapp.com/legal/privacy-policy"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-primary-light underline transition hover:text-primary"
+                  className="text-primary underline transition hover:text-primary"
                 >
                   WhatsApp&apos;s Privacy Policy
                 </a>
                 .
               </li>
               <li>
-                <strong className="text-white">Anthropic (Claude AI)</strong> —
+                <strong className="text-heading">Anthropic (Claude AI)</strong> —
                 Your message content is processed by Anthropic&apos;s Claude AI
                 to generate responses. Anthropic&apos;s data practices are
                 governed by{" "}
@@ -143,14 +143,14 @@ export default function PrivacyPolicy() {
                   href="https://www.anthropic.com/privacy"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-primary-light underline transition hover:text-primary"
+                  className="text-primary underline transition hover:text-primary"
                 >
                   Anthropic&apos;s Privacy Policy
                 </a>
                 .
               </li>
               <li>
-                <strong className="text-white">Google (optional)</strong> — If
+                <strong className="text-heading">Google (optional)</strong> — If
                 you connect your Google account, the Service may access Google
                 APIs (Gmail, Drive, Sheets, Calendar) on your behalf. This
                 access is governed by{" "}
@@ -158,7 +158,7 @@ export default function PrivacyPolicy() {
                   href="https://policies.google.com/privacy"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-primary-light underline transition hover:text-primary"
+                  className="text-primary underline transition hover:text-primary"
                 >
                   Google&apos;s Privacy Policy
                 </a>
@@ -201,21 +201,21 @@ export default function PrivacyPolicy() {
             </p>
             <ul className="list-disc space-y-2 pl-6">
               <li>
-                <strong className="text-white">Conversation history</strong> is
+                <strong className="text-heading">Conversation history</strong> is
                 tied to your active session. When you reset your session (via
-                the <code className="rounded bg-surface-light px-1.5 py-0.5 text-sm">/reset</code> command), your conversation history is
+                the <code className="rounded bg-slate-100 px-1.5 py-0.5 text-sm">/reset</code> command), your conversation history is
                 permanently deleted.
               </li>
               <li>
-                <strong className="text-white">Account information</strong>{" "}
+                <strong className="text-heading">Account information</strong>{" "}
                 (phone number, display name) is retained while your account is
                 active. You may request deletion at any time.
               </li>
               <li>
-                <strong className="text-white">Sandbox workspace files</strong>{" "}
+                <strong className="text-heading">Sandbox workspace files</strong>{" "}
                 that you create during interactions are stored in your isolated
                 environment and can be deleted by you at any time using
-                the <code className="rounded bg-surface-light px-1.5 py-0.5 text-sm">/sandbox clean</code> command.
+                the <code className="rounded bg-slate-100 px-1.5 py-0.5 text-sm">/sandbox clean</code> command.
               </li>
             </ul>
           </Section>
@@ -224,21 +224,21 @@ export default function PrivacyPolicy() {
             <p>You have the right to:</p>
             <ul className="list-disc space-y-2 pl-6">
               <li>
-                <strong className="text-white">Access</strong> — Request a
+                <strong className="text-heading">Access</strong> — Request a
                 copy of the personal data we hold about you.
               </li>
               <li>
-                <strong className="text-white">Deletion</strong> — Request
+                <strong className="text-heading">Deletion</strong> — Request
                 that we delete your personal data. You can also delete your
                 conversation and workspace data yourself using
-                the <code className="rounded bg-surface-light px-1.5 py-0.5 text-sm">/reset</code> and <code className="rounded bg-surface-light px-1.5 py-0.5 text-sm">/sandbox clean</code> commands.
+                the <code className="rounded bg-slate-100 px-1.5 py-0.5 text-sm">/reset</code> and <code className="rounded bg-slate-100 px-1.5 py-0.5 text-sm">/sandbox clean</code> commands.
               </li>
               <li>
-                <strong className="text-white">Correction</strong> — Request
+                <strong className="text-heading">Correction</strong> — Request
                 that we correct any inaccurate personal data.
               </li>
               <li>
-                <strong className="text-white">Withdraw consent</strong> — Stop
+                <strong className="text-heading">Withdraw consent</strong> — Stop
                 using the Service at any time. You may also request complete
                 account removal.
               </li>
@@ -277,7 +277,7 @@ export default function PrivacyPolicy() {
             <p>
               <a
                 href="mailto:privacy@swayat.com"
-                className="text-primary-light underline transition hover:text-primary"
+                className="text-primary underline transition hover:text-primary"
               >
                 privacy@swayat.com
               </a>

@@ -26,7 +26,7 @@ module.exports = {
   // Open access mode: when true, all DMs are allowed (standalone bot)
   openAccess: process.env.OPEN_ACCESS !== 'false',
   // Docker sandbox settings
-  sandboxEnabled: process.env.SANDBOX_ENABLED !== 'false',
+  sandboxEnabled: process.env.SANDBOX_ENABLED === 'true',
   sandboxBaseDir: process.env.SANDBOX_BASE_DIR || '/media/ddarji/storage/ai-assistant/sandboxes',
   sandboxMemory: process.env.SANDBOX_MEMORY || '512m',
   sandboxCpus: process.env.SANDBOX_CPUS || '1',
@@ -37,12 +37,25 @@ module.exports = {
   googleClientId: process.env.GOOGLE_CLIENT_ID || '',
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
   googleRedirectUri: process.env.GOOGLE_REDIRECT_URI || '',
+  // Microsoft / Outlook OAuth2
+  microsoftClientId: process.env.MICROSOFT_CLIENT_ID || '',
+  microsoftClientSecret: process.env.MICROSOFT_CLIENT_SECRET || '',
+  microsoftRedirectUri: process.env.MICROSOFT_REDIRECT_URI || '',
   // MCP server paths (for Google integration inside Docker sandboxes)
   nodeBinaryPath: process.env.NODE_BINARY_PATH || '/home/ddarji/.nvm/versions/node/v20.20.0/bin/node',
   mcpServerPath: process.env.MCP_SERVER_PATH || path.join(__dirname, '..', 'dist', 'google-mcp-server.bundle.js'),
+  // GitHub App (for repo management via Website Manager agent)
+  githubAppId: process.env.GITHUB_APP_ID || '',
+  githubAppSlug: process.env.GITHUB_APP_SLUG || 'swayat-ai-assistant',
+  githubClientId: process.env.GITHUB_CLIENT_ID || '',
+  githubClientSecret: process.env.GITHUB_CLIENT_SECRET || '',
+  githubPrivateKeyPath: process.env.GITHUB_PRIVATE_KEY_PATH || '',
+  githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET || '',
   // Resend MCP (per-user API keys stored in resend-keys.json)
   resendMcpPath: process.env.RESEND_MCP_PATH || path.join(__dirname, '..', 'dist', 'resend-mcp-server.bundle.mjs'),
   // Playwright MCP (browser automation)
   playwrightMcpPath: process.env.PLAYWRIGHT_MCP_PATH || path.join(__dirname, '..', 'node_modules', '@playwright', 'mcp', 'cli.js'),
   playwrightBrowsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH || '/media/ddarji/storage/.cache/playwright',
+  // Outlook MCP server path
+  outlookMcpServerPath: process.env.OUTLOOK_MCP_SERVER_PATH || path.join(__dirname, '..', 'dist', 'outlook-mcp-server.bundle.js'),
 };

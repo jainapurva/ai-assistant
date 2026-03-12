@@ -159,58 +159,10 @@ function checkStuckTasks() {
   }
 }
 
-/**
- * Check 6: Stale Docker bind mounts for credentials.
- * If sandbox containers have a credentials bind mount pointing to a
- * deleted inode (from atomic rename on token refresh), restart them.
- */
-function checkStaleSandboxCredentials() {
-  try {
-    const output = execFileSync('docker', ['ps', '-q', '--filter', 'name=ai-sandbox-'], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 5000,
-    }).toString().trim();
-
-    if (!output) return { ok: true, reason: 'No sandbox containers' };
-
-    const containers = output.split('\n').filter(Boolean);
-    const stale = [];
-
-    for (const id of containers) {
-      try {
-        // Check if the credentials file is readable inside the container
-        execFileSync('docker', ['exec', id, 'cat', '/home/claude/.claude/.credentials.json'], {
-          stdio: ['ignore', 'pipe', 'ignore'],
-          timeout: 5000,
-        });
-      } catch {
-        // File not readable — stale bind mount
-        try {
-          const name = execFileSync('docker', ['inspect', '--format', '{{.Name}}', id], {
-            stdio: ['ignore', 'pipe', 'ignore'],
-            timeout: 3000,
-          }).toString().trim().replace(/^\//, '');
-          stale.push(name);
-          // Auto-fix: restart the container to refresh bind mounts
-          execFileSync('docker', ['restart', name], { stdio: 'ignore', timeout: 15000 });
-        } catch {}
-      }
-    }
-
-    if (stale.length > 0) {
-      return { ok: false, reason: `Restarted ${stale.length} container(s) with stale credential mounts: ${stale.join(', ')}` };
-    }
-    return { ok: true };
-  } catch (err) {
-    return { ok: true, reason: `Sandbox cred check skipped: ${err.message}` };
-  }
-}
-
 module.exports = {
   checkProcessAlive,
   checkWebhookPort,
   checkApiHealth,
   checkClaudeAuth,
   checkStuckTasks,
-  checkStaleSandboxCredentials,
 };

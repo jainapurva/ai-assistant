@@ -2,7 +2,7 @@ const steps = [
   {
     step: "1",
     title: "Enter your phone number",
-    description: "Sign up with your WhatsApp number. Got a promo code? Even better — unlock a free trial.",
+    description: "Sign up with your WhatsApp number — it only takes a few seconds.",
   },
   {
     step: "2",
@@ -18,20 +18,20 @@ const steps = [
 
 export default function HowItWorks() {
   return (
-    <section id="how-it-works" className="px-6 py-24">
+    <section id="how-it-works" className="bg-surface-light px-6 py-24">
       <div className="mx-auto max-w-4xl">
-        <h2 className="text-center text-3xl font-bold sm:text-4xl">
+        <h2 className="text-center text-3xl font-bold text-heading sm:text-4xl">
           Up and running in{" "}
-          <span className="text-primary-light">30 seconds</span>
+          <span className="text-primary">30 seconds</span>
         </h2>
         <div className="mt-16 grid gap-10 sm:grid-cols-3">
           {steps.map((s) => (
             <div key={s.step} className="text-center">
-              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-primary/20 text-2xl font-bold text-primary-light">
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 text-2xl font-bold text-primary">
                 {s.step}
               </div>
-              <h3 className="mt-5 text-lg font-semibold">{s.title}</h3>
-              <p className="mt-2 text-sm leading-relaxed text-gray-400">
+              <h3 className="mt-5 text-lg font-semibold text-heading">{s.title}</h3>
+              <p className="mt-2 text-sm leading-relaxed text-body">
                 {s.description}
               </p>
             </div>

@@ -3,11 +3,12 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const { createProvider } = require('./providers');
-const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearSession, setProjectDir, getProjectDir, clearProjectDir, setChatModel, getChatModel, clearChatModel, getTokenUsage, resetTokenUsage, isGreeted, markGreeted, isSubscribed, addSubscription, removeSubscription, getSubscribedUsers, isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup, getSandboxKey, setPendingTask, clearPendingTask, getPendingTasks, setPersistedQueue, getPersistedQueue, clearPersistedQueue } = require('./claude');
+const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearSession, setProjectDir, getProjectDir, clearProjectDir, setChatModel, getChatModel, clearChatModel, getTokenUsage, resetTokenUsage, isGreeted, markGreeted, isSubscribed, addSubscription, removeSubscription, getSubscribedUsers, isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup, getSandboxKey, getUserAgent, setUserAgent, setPendingTask, clearPendingTask, getPendingTasks, setPersistedQueue, getPersistedQueue, clearPersistedQueue } = require('./claude');
 const { ensureProfile, getProfile, registerUser, getAllProfiles, formatProfileCard } = require('./profiles');
 const apiCommands = require('./api-commands');
 const drive = require('./drive');
 const googleAuth = require('./google-auth');
+const microsoftAuth = require('./microsoft-auth');
 const resendAuth = require('./resend-auth');
 const { stripAnsi, chunkMessage, markdownToWhatsApp } = require('./formatter');
 const { detectOptions } = require('./options');
@@ -16,6 +17,7 @@ const sandbox = require('./sandbox');
 const scheduler = require('./scheduler');
 const logger = require('./logger');
 const chatLogger = require('./chat-logger');
+const activity = require('./activity-logger');
 const { sanitizePaths } = require('./security');
 
 // ── PID file for watchdog (written after ports bind, see bottom of file) ──
@@ -201,6 +203,15 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
   // Log the user message
   const logSenderId = senderId || config.whitelistedNumber;
   chatLogger.logUserMessage(logSenderId, chatId, prompt);
+  const agentId = getUserAgent(chatId);
+  activity.logMessageIn(chatId, {
+    agentId,
+    senderId: logSenderId, senderName,
+    type: mediaPaths ? 'media' : 'text',
+    content: prompt,
+    mediaType: mediaPaths ? 'attachment' : null,
+    isGroup: chatId.endsWith('@g.us'),
+  });
 
   // Only show "Working on it..." if Claude takes more than 5 seconds
   const WORKING_DELAY_MS = 5000;
@@ -307,6 +318,7 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
               logger.info(`Output file ${f} is ${(stat.size / 1048576).toFixed(1)}MB — uploading to Drive`);
               try {
                 const link = await drive.uploadFile(fileSenderId, chatId, chatId, fullPath);
+                activity.logMediaOut(chatId, { agentId, filename: f, sizeBytes: stat.size, type: 'file', destination: 'drive' });
                 await botReply(msg, `📤 *${f}* (${(stat.size / 1048576).toFixed(1)}MB) uploaded to Drive:\n${link}`);
               } catch (e) {
                 await botReply(msg, `⚠️ File *${f}* is ${(stat.size / 1048576).toFixed(1)}MB — Drive upload failed: ${e.message}`);
@@ -317,6 +329,7 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
           } else {
             // Small file → send directly via WhatsApp
             logger.info(`Sending output file to user: ${f} (${(stat.size / 1024).toFixed(1)}KB)`);
+            activity.logMediaOut(chatId, { agentId, filename: f, sizeBytes: stat.size, type: IMAGE_EXTS.has(ext) ? 'image' : 'file', destination: 'whatsapp' });
             await provider.sendMedia(chatId, fullPath, {
               sendMediaAsDocument: true,
               caption: f,
@@ -332,11 +345,13 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
 
     if (!cleaned) {
       chatLogger.logAIResponse(logSenderId, chatId, '(no text output)');
+      activity.logMessageOut(chatId, { agentId, content: '(no text output)', chunks: 1, trigger: 'claude' });
       await botReply(msg, '✅ Done (no text output)');
       return;
     }
 
     chatLogger.logAIResponse(logSenderId, chatId, cleaned);
+    activity.logMessageOut(chatId, { agentId, content: cleaned, trigger: 'claude' });
     await sendClaudeResponse(msg, chatId, cleaned);
     logger.info(`Response sent (${cleaned.length} chars)`);
   } catch (err) {
@@ -345,9 +360,11 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
     if (err.message === 'STOPPED_BY_USER') {
       logger.info(`Task stopped by user for chat ${chatId}`);
       chatLogger.logError(logSenderId, chatId, 'Stopped by user');
+      activity.logError(chatId, { agentId, error: 'Stopped by user', context: 'task_stop' });
     } else {
       logger.error('Error processing message:', err.message);
       chatLogger.logError(logSenderId, chatId, err.message);
+      activity.logError(chatId, { agentId, error: err.message, context: 'claude_run' });
       try { await botReply(msg, `❌ Error: ${err.message}`); } catch (e) {
         logger.error('Failed to send error reply:', e.message);
       }
@@ -362,6 +379,8 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
         try { fs.unlinkSync(mp); } catch (e) {}
       }
     }
+    // Sync message count to DB
+    activity.syncToDb(chatId, { messagesIn: 1, messagesOut: 1 });
     // Process next queued message if any
     processQueue(chatId);
   }
@@ -413,13 +432,19 @@ _Files I create are automatically sent back to you!_
 *Commands:*
 /files - See & download files from your workspace
 /gmail - Connect Gmail & Google Drive
+/outlook - Connect Outlook email
 /resend - Set up email sending via Resend
+/github - Connect your GitHub repos
+/repos - List connected repos
+/repo <name> - Set active repo
 /drive - List files uploaded to Google Drive
 /sandbox - Check your workspace status
 /sandbox clean - Clean sandbox workspace
 /usage - See your token usage
 /register <name> [email] - Create your user profile
 /profile - View your profile & usage stats
+/agents - See available agents
+/agent <name> - Switch to a different agent
 /stop - Stop a running task
 /reset - Start fresh (clears session)
 /status - Check bot status
@@ -483,6 +508,38 @@ provider.addRoute('POST', '/send', (req, res) => {
   });
 });
 
+// --- /setup-agent route (called by swayat.com signup to set agent + send welcome) ---
+provider.addRoute('POST', '/setup-agent', (req, res) => {
+  let body = '';
+  req.on('data', chunk => body += chunk);
+  req.on('end', async () => {
+    try {
+      const { chatId, agentId } = JSON.parse(body);
+      if (!chatId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'chatId required' }));
+      }
+
+      const agents = require('./agents');
+      const agent = agents.getAgent(agentId || 'general');
+
+      // Set the user's active agent
+      setUserAgent(chatId, agent.id);
+
+      // Send agent-specific welcome (or default)
+      if (agent.welcome) {
+        await botSendMessage(chatId, agent.welcome);
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', agent: agent.id }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  });
+});
+
 // --- Google OAuth callback (registered on public webhook server) ---
 
 if (googleAuth.isConfigured()) {
@@ -519,6 +576,80 @@ if (googleAuth.isConfigured()) {
     }
   });
   logger.info('Google integration enabled (Gmail, Drive, Docs, Sheets)');
+}
+
+// --- Microsoft OAuth callback (registered on public webhook server) ---
+
+if (microsoftAuth.isConfigured()) {
+  provider.addRoute('GET', '/auth/microsoft/callback', async (req, res) => {
+    try {
+      const url = new URL(req.url, `http://localhost:${config.webhookPort}`);
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      const error = url.searchParams.get('error');
+
+      if (error) {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<h2>Authorization cancelled.</h2><p>You can close this window and try /outlook login again in WhatsApp.</p>');
+        return;
+      }
+
+      if (!code || !state) {
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end('<h2>Missing authorization code.</h2>');
+        return;
+      }
+
+      const result = await microsoftAuth.handleCallback(code, state);
+
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<h2>Outlook connected!</h2><p>Signed in as <b>${result.email}</b>.</p><p>Outlook Mail is now available.</p><p>You can close this window and return to WhatsApp.</p>`);
+
+      await botSendMessage(result.waId, `*Outlook connected!*\n\nSigned in as *${result.email}*.\n\nYou now have access to:\n• *Outlook Mail* — /outlook send, inbox, read\n\n\`/outlook logout\` to disconnect.`);
+    } catch (e) {
+      logger.error('Microsoft OAuth callback error:', e.message);
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<h2>Authorization failed.</h2><p>${e.message}</p><p>Please try /outlook login again.</p>`);
+    }
+  });
+  logger.info('Microsoft integration enabled (Outlook Mail)');
+}
+
+// --- GitHub App install callback (called by swayat.com GitHub OAuth callback) ---
+
+const githubAuth = require('./github-auth');
+
+if (githubAuth.isConfigured()) {
+  provider.addRoute('POST', '/github/install', (req, res) => {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { code, state, installationId } = JSON.parse(body);
+        if (!code || !state || !installationId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'Missing code, state, or installationId' }));
+        }
+
+        const result = await githubAuth.handleCallback(code, state, installationId);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'connected', account: result.account }));
+
+        // Notify user on WhatsApp
+        await botSendMessage(result.waId,
+          `*GitHub connected!* 🎉\n\n` +
+          `Signed in as *${result.account}*.\n\n` +
+          `Use \`/repos\` to see your repos and \`/repo <name>\` to start working on one.`
+        );
+      } catch (e) {
+        logger.error('GitHub install callback error:', e.message);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  });
+  logger.info('GitHub App integration enabled');
 }
 
 // --- Task recovery after restart ---
@@ -738,6 +869,14 @@ provider.on('message', async (msg) => {
 
   // Handle commands (text only)
   if (isText) {
+    // Log all slash commands to activity tracker
+    if (caption.startsWith('/')) {
+      const parts = caption.match(/^\/(\S+)(?:\s+(.*))?$/s);
+      if (parts) {
+        activity.logCommand(chatId, { agentId: getUserAgent(chatId), command: parts[1].toLowerCase(), args: parts[2] || null, senderId });
+      }
+    }
+
     if (caption.toLowerCase() === '/stop' || caption.toLowerCase() === '/stop all') {
       const clearAll = caption.toLowerCase() === '/stop all';
       const qLen = getQueueLength(chatId);
@@ -808,11 +947,16 @@ provider.on('message', async (msg) => {
       } else {
         statusText += `✅ *Idle — no task running*\nModel: ${currentModel}`;
       }
-      // Only show project path to admins
-      if (senderIsAdmin) {
-        const projDir = getProjectDir(chatId) || '(none — using home dir)';
-        statusText += `\nProject: ${projDir}`;
-      }
+      // Show current agent
+      const agentsModule = require('./agents');
+      const currentAgentId = getUserAgent(chatId);
+      const currentAgentDef = agentsModule.getAgent(currentAgentId);
+      statusText += `\nAgent: ${currentAgentDef.icon} ${currentAgentDef.name}`;
+
+      // Show current project name (never the full path)
+      const projDir = getProjectDir(chatId);
+      const projName = projDir ? path.basename(projDir) : '(default workspace)';
+      statusText += `\nProject: ${projName}`;
 
       // Show sandbox info if enabled
       if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
@@ -853,15 +997,64 @@ provider.on('message', async (msg) => {
       if (usage.tasks === 0) {
         await botReply(msg, '📊 No token usage recorded for this chat yet.');
       } else {
-        await botReply(msg,
+        let usageText =
           `📊 *Token usage for this chat*\n\n` +
-          `🔤 Input:  ${usage.input.toLocaleString()}\n` +
-          `🔤 Output: ${usage.output.toLocaleString()}\n` +
-          `📦 Total:  ${total.toLocaleString()}\n` +
-          `✅ Tasks:  ${usage.tasks}\n\n` +
-          `_Counters reset on /reset_`
-        );
+          `*Tokens*\n` +
+          `• Input: ${usage.input.toLocaleString()}\n` +
+          `• Output: ${usage.output.toLocaleString()}\n` +
+          `• Cache write: ${(usage.cacheCreation || 0).toLocaleString()}\n` +
+          `• Cache read: ${(usage.cacheRead || 0).toLocaleString()}\n` +
+          `• Total: ${total.toLocaleString()}\n\n` +
+          `*Usage*\n` +
+          `• Tasks: ${usage.tasks}\n` +
+          `• Cost: $${(usage.costUsd || 0).toFixed(4)}\n\n` +
+          `_Counters reset on /reset_`;
+        await botReply(msg, usageText);
       }
+      return;
+    }
+
+    // /agents — list available agents
+    if (caption.toLowerCase() === '/agents') {
+      const agentsModule = require('./agents');
+      const currentAgent = getUserAgent(chatId);
+      await botReply(msg, agentsModule.formatAgentList(currentAgent));
+      return;
+    }
+
+    // /agent <name> — switch to a different agent
+    const agentMatch = caption.match(/^\/agent\s+(.+)$/i);
+    if (agentMatch) {
+      const agentsModule = require('./agents');
+      const input = agentMatch[1].trim();
+      const agent = agentsModule.resolveAgent(input);
+
+      if (!agent) {
+        await botReply(msg, `❌ Unknown agent: _${input}_\n\nUse /agents to see available agents.`);
+        return;
+      }
+
+      const currentAgent = getUserAgent(chatId);
+      if (agent.id === currentAgent) {
+        await botReply(msg, `You're already using ${agent.icon} *${agent.name}*.`);
+        return;
+      }
+
+      // Stop any running task before switching
+      if (isRunning(chatId)) {
+        stopClaude(chatId);
+        processing.delete(chatId);
+      }
+
+      // Switch agent (session is preserved per agent, auto-resumes when switching back)
+      setUserAgent(chatId, agent.id);
+      clearProjectDir(chatId); // Reset project dir so agent workspace is used
+
+      let reply = `Switched to ${agent.icon} *${agent.name}*`;
+      if (agent.welcome) {
+        reply += `\n\n${agent.welcome}`;
+      }
+      await botReply(msg, reply);
       return;
     }
 
@@ -1243,6 +1436,106 @@ provider.on('message', async (msg) => {
       return;
     }
 
+    // /outlook [status|login|logout|send|inbox|read] — Outlook integration
+    const outlookMatch = caption.match(/^\/outlook(?:\s+(.*))?$/is);
+    if (outlookMatch) {
+      if (!microsoftAuth.isConfigured()) {
+        await botReply(msg, '❌ Outlook is not configured. Set MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, and MICROSOFT_REDIRECT_URI in .env.');
+        return;
+      }
+
+      const outlookSenderId = senderId || config.whitelistedNumber;
+      const rawArgs = (outlookMatch[1] || '').trim();
+      const subcommand = rawArgs.toLowerCase().split(/\s+/)[0] || '';
+
+      // /outlook or /outlook status
+      if (!subcommand || subcommand === 'status') {
+        const status = microsoftAuth.getStatus(outlookSenderId);
+        if (status.connected) {
+          await botReply(msg, `*Outlook connected*\n\nSigned in as *${status.email}*\nConnected: ${new Date(status.connectedAt).toLocaleDateString()}\n\nOutlook commands:\n\`/outlook send <to> <subject> | <body>\`\n\`/outlook inbox [query]\`\n\`/outlook read <id>\`\n\`/outlook logout\``);
+        } else {
+          await botReply(msg, `*Outlook not connected*\n\nUse \`/outlook login\` to connect your Microsoft account.`);
+        }
+        return;
+      }
+
+      // /outlook login
+      if (subcommand === 'login') {
+        const authUrl = microsoftAuth.getAuthUrl(outlookSenderId);
+        await botReply(msg, `*Connect your Outlook account*\n\nTap the link below to authorize:\n${authUrl}\n\n_This grants access to Outlook Mail._\n_Link expires in 10 minutes._`);
+        return;
+      }
+
+      // /outlook logout
+      if (subcommand === 'logout') {
+        microsoftAuth.removeUserTokens(outlookSenderId);
+        await botReply(msg, 'Outlook disconnected. Your tokens have been removed.');
+        return;
+      }
+
+      // /outlook send <to> <subject> | <body>
+      const sendMatch = rawArgs.match(/^send\s+(\S+)\s+(.+?)\s*\|\s*(.+)/is);
+      if (sendMatch) {
+        const [, to, subject, body] = sendMatch;
+        await botReply(msg, 'Sending email...');
+        try {
+          const result = await microsoftAuth.sendEmail(outlookSenderId, to.trim(), subject.trim(), body.trim());
+          await botReply(msg, `*Email sent!*\n\nFrom: ${result.from}\nTo: ${result.to}\nSubject: ${result.subject}`);
+        } catch (e) {
+          await botReply(msg, `❌ Failed to send email: ${e.message}`);
+        }
+        return;
+      }
+
+      // /outlook inbox [query]
+      if (subcommand === 'inbox') {
+        const query = rawArgs.replace(/^inbox\s*/i, '').trim() || null;
+        await botReply(msg, 'Fetching emails...');
+        try {
+          const emails = await microsoftAuth.listEmails(outlookSenderId, query, 10);
+          if (emails.length === 0) {
+            await botReply(msg, 'No emails found.');
+          } else {
+            const lines = emails.map((e, i) =>
+              `*${i + 1}.* ${e.subject || '(no subject)'}\n   From: ${e.from}\n   ${e.date}\n   ID: \`${e.id}\``
+            ).join('\n\n');
+            await botSendChunks(msg, `*Inbox${query ? ` — "${query}"` : ''}:*\n\n${lines}\n\n_Use \`/outlook read <id>\` to read an email._`);
+          }
+        } catch (e) {
+          await botReply(msg, `❌ Failed to fetch emails: ${e.message}`);
+        }
+        return;
+      }
+
+      // /outlook read <messageId>
+      if (subcommand === 'read') {
+        const messageId = rawArgs.replace(/^read\s*/i, '').trim();
+        if (!messageId) {
+          await botReply(msg, 'Usage: `/outlook read <message-id>`\n\nGet message IDs from `/outlook inbox`.');
+          return;
+        }
+        try {
+          const email = await microsoftAuth.getEmail(outlookSenderId, messageId);
+          const text = [
+            `*${email.subject || '(no subject)'}*`,
+            `From: ${email.from}`,
+            `To: ${email.to}`,
+            `Date: ${email.date}`,
+            '',
+            email.body || '(empty)',
+          ].join('\n');
+          await botSendChunks(msg, text);
+        } catch (e) {
+          await botReply(msg, `❌ Failed to read email: ${e.message}`);
+        }
+        return;
+      }
+
+      // Unknown subcommand — show help
+      await botReply(msg, `*Outlook commands:*\n\n\`/outlook\` — Connection status\n\`/outlook login\` — Connect Microsoft account\n\`/outlook logout\` — Disconnect\n\`/outlook send <to> <subject> | <body>\` — Send email\n\`/outlook inbox [query]\` — List/search emails\n\`/outlook read <id>\` — Read an email`);
+      return;
+    }
+
     // /resend [status|setup|disconnect] — Resend email integration
     const resendMatch = caption.match(/^\/resend(?:\s+(.*))?$/is);
     if (resendMatch) {
@@ -1303,6 +1596,140 @@ provider.on('message', async (msg) => {
 
       // Unknown subcommand — show help
       await botReply(msg, `*Resend commands:*\n\n\`/resend\` — Setup guide / connection status\n\`/resend setup <api-key>\` — Connect your Resend account\n\`/resend status\` — Check connection\n\`/resend disconnect\` — Remove API key`);
+      return;
+    }
+
+    // /github [status|disconnect] — GitHub App integration
+    const githubMatch = caption.match(/^\/github(?:\s+(.*))?$/is);
+    if (githubMatch) {
+      if (!githubAuth.isConfigured()) {
+        await botReply(msg, 'GitHub integration is not configured on this bot.');
+        return;
+      }
+      const subcommand = (githubMatch[1] || '').trim().toLowerCase();
+      const ghSenderId = isGroup ? senderId : chatId;
+
+      // /github or /github status
+      if (!subcommand || subcommand === 'status') {
+        const status = githubAuth.getStatus(ghSenderId);
+        if (status.connected) {
+          await botReply(msg, `*GitHub connected*\n\nAccount: *${status.account}*\nConnected: ${new Date(status.connectedAt).toLocaleDateString()}\n\nUse \`/repos\` to list repos\nUse \`/repo <name>\` to set active repo\n\`/github disconnect\` to remove`);
+        } else {
+          const url = githubAuth.getInstallUrl(ghSenderId);
+          await botReply(msg, `*Connect your GitHub repos*\n\nClick the link below to install the Swayat AI app on your GitHub account. You'll choose which repos to give access to.\n\n${url}\n\nAfter installing, come back here and use \`/repos\` to see your repos.`);
+        }
+        return;
+      }
+
+      // /github disconnect
+      if (subcommand === 'disconnect') {
+        githubAuth.removeInstallation(ghSenderId);
+        await botReply(msg, 'GitHub disconnected. You can reconnect anytime with `/github`.');
+        return;
+      }
+
+      // Unknown
+      await botReply(msg, `*GitHub commands:*\n\n\`/github\` — Connect or check status\n\`/repos\` — List connected repos\n\`/repo <name>\` — Set active repo\n\`/github disconnect\` — Remove connection`);
+      return;
+    }
+
+    // /repos — list connected GitHub repos
+    if (caption.toLowerCase() === '/repos') {
+      if (!githubAuth.isConfigured()) {
+        await botReply(msg, 'GitHub integration is not configured.');
+        return;
+      }
+      const ghSenderId = isGroup ? senderId : chatId;
+      const status = githubAuth.getStatus(ghSenderId);
+      if (!status.connected) {
+        await botReply(msg, 'GitHub not connected. Use `/github` to connect your repos.');
+        return;
+      }
+      try {
+        const repos = await githubAuth.listRepos(ghSenderId);
+        if (repos.length === 0) {
+          await botReply(msg, 'No repos found. You may need to update your GitHub App permissions to include repos.');
+          return;
+        }
+        let text = `*Your GitHub repos (${repos.length}):*\n\n`;
+        repos.forEach((r, i) => {
+          text += `${i + 1}. *${r.name}* ${r.private ? '🔒' : '🌐'}\n   ${r.fullName}\n\n`;
+        });
+        text += `Set active repo: \`/repo <name>\``;
+        await botReply(msg, text);
+      } catch (e) {
+        await botReply(msg, `Failed to list repos: ${e.message}`);
+      }
+      return;
+    }
+
+    // /repo <name> — clone and set active repo
+    const repoMatch = caption.match(/^\/repo\s+(.+)$/i);
+    if (repoMatch) {
+      if (!githubAuth.isConfigured()) {
+        await botReply(msg, 'GitHub integration is not configured.');
+        return;
+      }
+      const ghSenderId = isGroup ? senderId : chatId;
+      const status = githubAuth.getStatus(ghSenderId);
+      if (!status.connected) {
+        await botReply(msg, 'GitHub not connected. Use `/github` to connect your repos.');
+        return;
+      }
+
+      const input = repoMatch[1].trim().toLowerCase();
+      try {
+        const repos = await githubAuth.listRepos(ghSenderId);
+        const match = repos.find(r =>
+          r.name.toLowerCase() === input ||
+          r.fullName.toLowerCase() === input ||
+          r.name.toLowerCase().includes(input)
+        );
+        if (!match) {
+          await botReply(msg, `Repo "${repoMatch[1].trim()}" not found. Use \`/repos\` to see available repos.`);
+          return;
+        }
+
+        await botReply(msg, `Cloning *${match.fullName}*...`);
+
+        // Clone into agent workspace
+        const { execFileSync } = require('child_process');
+        const agentId = getUserAgent(chatId);
+        const sandboxKey = getSandboxKey(chatId, senderId);
+        const { base } = sandbox.ensureSandboxDirs(sandboxKey);
+        const agents = require('./agents');
+        const workspace = agents.ensureAgentWorkspace(base, agentId);
+        const repoDir = path.join(workspace, match.name);
+
+        const cloneUrl = await githubAuth.getCloneUrl(ghSenderId, match.fullName);
+
+        if (fs.existsSync(repoDir)) {
+          // Repo already cloned — pull latest
+          const { token } = await githubAuth.generateInstallationToken(ghSenderId);
+          execFileSync('git', ['remote', 'set-url', 'origin', cloneUrl], { cwd: repoDir });
+          execFileSync('git', ['pull', '--ff-only'], { cwd: repoDir, timeout: 60000 });
+          await botReply(msg, `Pulled latest for *${match.fullName}*. Repo is ready.`);
+        } else {
+          execFileSync('git', ['clone', '--depth', '1', cloneUrl, repoDir], { timeout: 120000 });
+          await botReply(msg, `Cloned *${match.fullName}* (${match.defaultBranch} branch).`);
+        }
+
+        // Set as active project dir
+        setProjectDir(chatId, repoDir);
+
+        // Write git credentials for Claude to push
+        const { token } = await githubAuth.generateInstallationToken(ghSenderId);
+        const credPath = path.join(repoDir, '.git-credentials');
+        fs.writeFileSync(credPath, `https://x-access-token:${token}@github.com\n`, { mode: 0o600 });
+        execFileSync('git', ['config', 'credential.helper', `store --file=${credPath}`], { cwd: repoDir });
+        execFileSync('git', ['config', 'user.name', 'Swayat AI'], { cwd: repoDir });
+        execFileSync('git', ['config', 'user.email', 'bot@swayat.com'], { cwd: repoDir });
+
+        await botReply(msg, `*${match.name}* is now your active repo. I can edit files, commit, and push changes.\n\nJust tell me what to do!`);
+      } catch (e) {
+        logger.error('Repo clone error:', e.message);
+        await botReply(msg, `Failed to set up repo: ${e.message}`);
+      }
       return;
     }
 
@@ -1384,75 +1811,9 @@ provider.on('message', async (msg) => {
       return;
     }
 
-    // /project <path> — set working directory for this chat (admin-only)
-    const projectMatch = caption.match(/^\/project\s+(.+)/i);
-    if (projectMatch) {
-      if (!senderIsAdmin) {
-        await botReply(msg, '🔒 This command is admin-only.');
-        return;
-      }
-      const home = process.env.HOME || '/home/ddarji';
-      const dir = projectMatch[1].trim().replace(/^~\//, home + '/').replace(/^~$/, home);
-      try {
-        setProjectDir(chatId, dir);
-        clearSession(chatId);
-        await botReply(msg, `📂 Project set: *${dir}*\nClaude will now run from this directory and pick up its CLAUDE.md, skills, and commands.\nSession reset for fresh start.`);
-      } catch (e) {
-        await botReply(msg, `❌ ${e.message}`);
-      }
-      return;
-    }
-
-    // /claude-projects or /projects — discover and list all Claude projects (admin-only)
-    if (caption.toLowerCase() === '/claude-projects' || caption.toLowerCase() === '/projects') {
-      if (!senderIsAdmin) {
-        await botReply(msg, '🔒 This command is admin-only.');
-        return;
-      }
-      const projects = discoverProjects();
-
-      if (projects.length === 0) {
-        await botReply(msg, '📂 No projects with CLAUDE.md or Claude memory found.');
-        return;
-      }
-
-      const currentDir = getProjectDir(chatId);
-
-      let summary = `📂 *Found ${projects.length} Claude project(s):*\n\n`;
-      const pollOptions = [];
-      const pollDirs = [];
-
-      for (let i = 0; i < projects.length; i++) {
-        const p = projects[i];
-        const isCurrent = currentDir === p.dir ? ' ✅' : '';
-        const badges = [];
-        if (p.hasClaudeMd) badges.push('📄');
-        if (p.hasMemory) badges.push('🧠');
-        const desc = getProjectSummary(p.dir);
-
-        summary += `*${i + 1}. ${p.name}*${isCurrent}\n${badges.join('')} ${p.dir}\n`;
-        if (desc) summary += `   _${desc}_\n`;
-        summary += '\n';
-
-        const shortPath = p.dir.replace(process.env.HOME || '/home/ddarji', '~');
-        let optLabel = shortPath;
-        if (isCurrent) optLabel += ' ✅';
-        if (optLabel.length > 100) optLabel = optLabel.slice(0, 97) + '...';
-        pollOptions.push(optLabel);
-        pollDirs.push(p.dir);
-      }
-
-      await botSendChunks(msg, summary);
-
-      setPendingProjectPoll(chatId, { dirs: pollDirs, options: pollOptions });
-      setQuickReplies(chatId, pollOptions);
-
-      if (pollOptions.length >= 2 && pollOptions.length <= 12) {
-        await botSendPoll(chatId, 'Select a project to open:', pollOptions);
-      } else if (pollOptions.length > 12) {
-        await botReply(msg, `_Reply with a number (1-${pollOptions.length}) to select a project._`);
-      }
-
+    // /project and /projects — disabled (users work within their own workspace only)
+    if (caption.match(/^\/projects?\b/i)) {
+      await botReply(msg, 'This command is not available. Your workspace is set up automatically.');
       return;
     }
 
@@ -1504,7 +1865,7 @@ provider.on('message', async (msg) => {
             clearSession(chatId);
             clearPendingProjectPoll(chatId);
             clearQuickReplies(chatId);
-            await botReply(msg, `📂 Project set: *${path.basename(dir)}*\n${dir}\n\nSession reset. Send a message to start working!`);
+            await botReply(msg, `📂 Project set: *${path.basename(dir)}*\n\nSession reset. Send a message to start working!`);
           } catch (e) {
             await botReply(msg, `❌ ${e.message}`);
           }
@@ -1856,6 +2217,187 @@ const apiServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: e.message }));
       }
     });
+  // ── Outlook API endpoints ──────────────────────────────────────────────────
+  } else if (req.method === 'POST' && req.url === '/outlook/send') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, to, subject, body: emailBody, cc, bcc, html } = JSON.parse(body);
+        if (!chatId || !to || !subject || !emailBody) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, to, subject, and body required' }));
+        }
+        const result = await microsoftAuth.sendEmail(chatId, to, subject, emailBody, { cc, bcc, html });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'sent', ...result }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/outlook/inbox') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, query, maxResults, folderId } = JSON.parse(body);
+        if (!chatId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId required' }));
+        }
+        const emails = await microsoftAuth.listEmails(chatId, query || null, maxResults || 10, folderId || null);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ emails }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/outlook/read') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, messageId } = JSON.parse(body);
+        if (!chatId || !messageId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId and messageId required' }));
+        }
+        const email = await microsoftAuth.getEmail(chatId, messageId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ email }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/outlook/reply') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, messageId, comment } = JSON.parse(body);
+        if (!chatId || !messageId || !comment) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, messageId, and comment required' }));
+        }
+        const result = await microsoftAuth.replyToEmail(chatId, messageId, comment);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/outlook/forward') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, messageId, to, comment } = JSON.parse(body);
+        if (!chatId || !messageId || !to) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, messageId, and to required' }));
+        }
+        const result = await microsoftAuth.forwardEmail(chatId, messageId, to, comment || '');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/outlook/delete') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, messageId } = JSON.parse(body);
+        if (!chatId || !messageId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId and messageId required' }));
+        }
+        const result = await microsoftAuth.deleteEmail(chatId, messageId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/outlook/move') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, messageId, destinationFolderId } = JSON.parse(body);
+        if (!chatId || !messageId || !destinationFolderId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, messageId, and destinationFolderId required' }));
+        }
+        const result = await microsoftAuth.moveEmail(chatId, messageId, destinationFolderId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/outlook/mark') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, messageId, isRead } = JSON.parse(body);
+        if (!chatId || !messageId || isRead === undefined) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, messageId, and isRead required' }));
+        }
+        const result = await microsoftAuth.markEmail(chatId, messageId, isRead);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/outlook/folders') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId } = JSON.parse(body);
+        if (!chatId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId required' }));
+        }
+        const folders = await microsoftAuth.listFolders(chatId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ folders }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/outlook/draft') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, to, subject, body: draftBody, html } = JSON.parse(body);
+        if (!chatId || !to || !subject || !draftBody) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, to, subject, and body required' }));
+        }
+        const result = await microsoftAuth.createDraft(chatId, to, subject, draftBody, { html });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'draft_created', ...result }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
   } else if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok' }));
@@ -1879,12 +2421,20 @@ apiServer.on('error', (err) => {
   process.exit(1);
 });
 
-// Prevent protocol errors from crashing Node
+// Prevent protocol errors from crashing Node — but exit on fatal port/startup errors
 process.on('uncaughtException', (err) => {
-  logger.error('Uncaught exception (non-fatal):', err.message);
+  logger.error('Uncaught exception:', err.message);
+  if (err.code === 'EADDRINUSE' || err.code === 'EACCES') {
+    logger.error('Fatal port error — exiting to avoid zombie process');
+    process.exit(1);
+  }
 });
 process.on('unhandledRejection', (reason) => {
-  logger.error('Unhandled rejection (non-fatal):', reason?.message || reason);
+  logger.error('Unhandled rejection:', reason?.message || reason);
+  if (reason?.code === 'EADDRINUSE' || reason?.code === 'EACCES') {
+    logger.error('Fatal port error — exiting to avoid zombie process');
+    process.exit(1);
+  }
 });
 
 // Graceful shutdown
@@ -1900,4 +2450,7 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 logger.info('Initializing Cloud API provider...');
-provider.initialize();
+provider.initialize().catch((err) => {
+  logger.error(`Webhook server failed to start: ${err.message}`);
+  process.exit(1);
+});

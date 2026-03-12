@@ -6,16 +6,22 @@ const logger = require('./logger');
 const { buildSafeEnv, filterSensitiveOutput, sanitizePaths, SECURITY_SYSTEM_PROMPT } = require('./security');
 const sandbox = require('./sandbox');
 const googleAuth = require('./google-auth');
+const microsoftAuth = require('./microsoft-auth');
 const resendAuth = require('./resend-auth');
+const activity = require('./activity-logger');
+const agents = require('./agents');
 
 // Persistent state file — survives bot restarts
 const STATE_FILE = path.join(config.stateDir, 'bot_state.json');
 
-// Per-chat session tracking (chatId -> sessionId)
+// Per-chat session tracking (chatId:agentId -> sessionId)
 const sessions = new Map();
 
 // Per-chat project directory (chatId -> directory path)
 const projectDirs = new Map();
+
+// Active agent per chat (chatId -> agentId)
+const activeAgents = new Map();
 
 // Per-chat model override (chatId -> model string)
 const chatModels = new Map();
@@ -113,10 +119,26 @@ function loadState() {
           subscribedUsers.add(id);
         }
       }
+      if (data.activeAgents) {
+        for (const [chatId, agentId] of Object.entries(data.activeAgents)) {
+          activeAgents.set(chatId, agentId);
+        }
+      }
       if (data.isolatedGroups) {
         for (const chatId of data.isolatedGroups) {
           isolatedGroups.add(chatId);
         }
+      }
+      // Migrate legacy sessions: keys without ':' become ':general'
+      const legacyKeys = [];
+      for (const key of sessions.keys()) {
+        if (!key.includes(':')) legacyKeys.push(key);
+      }
+      for (const key of legacyKeys) {
+        const sessionId = sessions.get(key);
+        sessions.delete(key);
+        sessions.set(`${key}:general`, sessionId);
+        logger.info(`Migrated session key: ${key} → ${key}:general`);
       }
       if (data.pendingTasks) {
         for (const [chatId, task] of Object.entries(data.pendingTasks)) {
@@ -144,6 +166,7 @@ function saveState() {
       sessions: Object.fromEntries(sessions),
       chatModels: Object.fromEntries(chatModels),
       tokenCounters: Object.fromEntries(tokenCounters),
+      activeAgents: Object.fromEntries(activeAgents),
       greetedChats: [...greetedChats],
       subscribedUsers: [...subscribedUsers],
       isolatedGroups: [...isolatedGroups],
@@ -253,10 +276,15 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false, opts = {}
   ];
 
   const useSandbox = config.sandboxEnabled && sandbox.isDockerAvailable();
+  const useBwrap = !useSandbox && sandbox.isBwrapAvailable();
+
+  // Agent-aware session key: chatId:agentId
+  const agentId = activeAgents.get(chatId) || agents.getDefaultAgentId();
+  const sessionKey = `${chatId}:${agentId}`;
 
   let sessionId = null;
   if (config.enableSessions) {
-    sessionId = sessions.get(chatId) || null;
+    sessionId = sessions.get(sessionKey) || null;
   }
 
   const hasSession = !!sessionId;
@@ -270,14 +298,15 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false, opts = {}
   let googlePrompt = '';
   let mcpConfig = null;
 
-  // Determine paths based on whether we're in a sandbox
-  const nodePath = useSandbox ? '/usr/local/bin/node' : config.nodeBinaryPath;
+  // Determine paths based on whether we're in a sandbox (Docker or bwrap)
+  const sandboxed = useSandbox || useBwrap;
+  const nodePath = useSandbox ? '/usr/local/bin/node' : (useBwrap ? '/opt/node/bin/node' : config.nodeBinaryPath);
   const apiUrl = useSandbox ? `http://host.docker.internal:${config.httpPort}` : `http://localhost:${config.httpPort}`;
 
   // Resend MCP — per-user API key
   const resendApiKey = resendAuth.resolveApiKey(chatId);
   if (resendApiKey) {
-    const resendMcpPath = useSandbox ? '/opt/mcp/resend-mcp-server.mjs' : path.resolve(config.resendMcpPath);
+    const resendMcpPath = sandboxed ? '/opt/mcp/resend-mcp-server.mjs' : path.resolve(config.resendMcpPath);
     mcpConfig = {
       mcpServers: {
         resend: {
@@ -294,7 +323,7 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false, opts = {}
     const googleStatus = googleAuth.getStatus(chatId);
 
     if (googleStatus.connected) {
-      const mcpPath = useSandbox ? '/opt/mcp/google-mcp-server.js' : path.resolve(config.mcpServerPath);
+      const mcpPath = sandboxed ? '/opt/mcp/google-mcp-server.js' : path.resolve(config.mcpServerPath);
 
       if (!mcpConfig) mcpConfig = { mcpServers: {} };
       mcpConfig.mcpServers.google = {
@@ -322,14 +351,47 @@ NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual co
     }
   }
 
+  // Outlook MCP — only when user has connected their Microsoft account
+  let outlookPrompt = '';
+  if (microsoftAuth.isConfigured()) {
+    const outlookStatus = microsoftAuth.getStatus(chatId);
+
+    if (outlookStatus.connected) {
+      const outlookMcpPath = sandboxed ? '/opt/mcp/outlook-mcp-server.js' : path.resolve(config.outlookMcpServerPath);
+
+      if (!mcpConfig) mcpConfig = { mcpServers: {} };
+      mcpConfig.mcpServers.outlook = {
+        command: nodePath,
+        args: [outlookMcpPath],
+        env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
+      };
+
+      outlookPrompt = `
+OUTLOOK INTEGRATION: Connected as ${outlookStatus.email}. You have MCP tools for Outlook Mail — use them directly.
+GUIDELINES:
+- When the user asks to send an email via Outlook, compose and send directly. Don't ask for confirmation unless ambiguous.
+- Use outlook_inbox with "query" for searching (Microsoft search syntax, e.g. "from:user@example.com", "subject:invoice").
+- Use outlook_reply/outlook_forward for replies and forwards.
+- Use outlook_folders to list available folders and outlook_move to organize emails.
+- NEVER suggest app passwords, SMTP setup, or manual configuration. You already have a built-in integration — use it.
+`;
+    } else {
+      outlookPrompt = `
+OUTLOOK INTEGRATION (NOT YET CONNECTED):
+If the user asks about Outlook email — tell them to type /outlook login to connect their Microsoft account.
+NEVER suggest app passwords, SMTP setup, or any manual configuration. The built-in integration handles everything automatically.
+`;
+    }
+  }
+
   // Playwright MCP — only for tasks that genuinely need interactive browser automation
   // (NOT for general web search, fetching URLs, or reading websites — WebSearch/WebFetch handle those)
   const NEEDS_BROWSER = /\b(take\s+a?\s*screenshot|screenshot\s+of|fill\s+(out\s+)?(the\s+)?form|submit\s+(the\s+)?form|log\s*in\s+to|sign\s*in\s+to|click\s+(the\s+|on\s+)?button|automate\s+(the\s+)?(website|page|site|browser)|browser\s+automation|interact\s+with\s+(the\s+)?(page|site|website))\b/i;
   if (NEEDS_BROWSER.test(prompt) || opts.useBrowser) {
-    const playwrightMcpPath = useSandbox
+    const playwrightMcpPath = sandboxed
       ? '/opt/mcp/node_modules/@playwright/mcp/cli.js'
       : path.resolve(config.playwrightMcpPath);
-    const playwrightBrowsersPath = useSandbox
+    const playwrightBrowsersPath = sandboxed
       ? '/opt/playwright-browsers'
       : config.playwrightBrowsersPath;
 
@@ -339,7 +401,7 @@ NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual co
       args: [playwrightMcpPath, '--headless'],
       env: {
         PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsersPath,
-        NODE_PATH: useSandbox ? '/opt/mcp/node_modules' : '',
+        NODE_PATH: sandboxed ? '/opt/mcp/node_modules' : '',
       },
     };
   }
@@ -374,10 +436,28 @@ Do NOT attempt to use Resend tools — they are not available until the user con
 `;
   }
 
+  // GitHub repo context — tell Claude it can commit and push
+  let githubPrompt = '';
+  const projectDir = getProjectDir(chatId);
+  if (projectDir) {
+    try {
+      const fs = require('fs');
+      const gitDir = require('path').join(projectDir, '.git');
+      if (fs.existsSync(gitDir)) {
+        githubPrompt = `
+GITHUB REPO: You are working in a cloned GitHub repository at the current directory. You can edit files, then commit and push.
+WORKFLOW: Make changes → git add <files> → git commit -m "descriptive message" → git push
+IMPORTANT: Always check git status before starting. Use descriptive commit messages. The push will trigger CI/CD deployment if configured.
+NEVER force push or rewrite history. Only push to the default branch.
+`;
+      }
+    } catch {}
+  }
+
   // For new sessions, prepend the memory system prompt + integration context
   const fullPrompt = hasSession
-    ? (playwrightPrompt + resendPrompt + googlePrompt + prompt)
-    : MEMORY_SYSTEM_PROMPT + playwrightPrompt + resendPrompt + googlePrompt + prompt;
+    ? (playwrightPrompt + resendPrompt + googlePrompt + outlookPrompt + githubPrompt + prompt)
+    : MEMORY_SYSTEM_PROMPT + playwrightPrompt + resendPrompt + googlePrompt + outlookPrompt + githubPrompt + prompt;
 
   // When --mcp-config is used, Claude CLI silently produces 0 bytes if the prompt
   // is passed as a CLI arg. The workaround: pipe the prompt via shell
@@ -388,10 +468,46 @@ Do NOT attempt to use Resend tools — they are not available until the user con
   // Layer 2: whitelist-only env — strips all API keys, tokens, and secrets
   const spawnEnv = buildSafeEnv();
 
-  const cwd = getProjectDir(chatId) || process.env.HOME;
+  // Use user-set project dir, or agent-specific workspace (never fall back to $HOME)
+  let cwd = getProjectDir(chatId);
+  if (!cwd) {
+    const { base } = sandbox.ensureSandboxDirs(sandboxKey || chatId);
+    cwd = agents.ensureAgentWorkspace(base, agentId);
+  }
+  // Refresh GitHub credentials if working in a git repo
+  if (cwd) {
+    try {
+      const gitDir = path.join(cwd, '.git');
+      const credPath = path.join(cwd, '.git-credentials');
+      if (fs.existsSync(gitDir) && fs.existsSync(credPath)) {
+        const githubAuth = require('./github-auth');
+        if (githubAuth.isConfigured()) {
+          const ghStatus = githubAuth.getStatus(chatId);
+          if (ghStatus.connected) {
+            const { token } = await githubAuth.generateInstallationToken(chatId);
+            fs.writeFileSync(credPath, `https://x-access-token:${token}@github.com\n`, { mode: 0o600 });
+          }
+        }
+      }
+    } catch (e) {
+      logger.warn(`Failed to refresh git credentials: ${e.message}`);
+    }
+  }
+
   logger.info(`Spawning claude [${runningClaudeCount}/${MAX_CONCURRENT_CLAUDE}] in ${useSandbox ? 'sandbox' : cwd}: ${args.slice(0, -1).join(' ')} "<prompt>"`);
 
   const sbKey = sandboxKey || chatId;
+
+  // Log task start to activity tracker
+  activity.logTaskStart(chatId, {
+    agentId,
+    model,
+    sessionId,
+    project: cwd,
+    promptPreview: prompt.slice(0, 200),
+    sandbox: useSandbox ? 'docker' : (useBwrap ? 'bwrap' : 'none'),
+  });
+
   let proc;
   if (useSandbox) {
     try {
@@ -401,8 +517,21 @@ Do NOT attempt to use Resend tools — they are not available until the user con
       logger.warn(`sandbox: fallback to host: ${err.message}`);
       proc = spawn(config.claudePath, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd, env: spawnEnv });
     }
+  } else if (sandbox.isBwrapAvailable()) {
+    // Bubblewrap sandbox — kernel-level filesystem isolation without Docker
+    logger.info(`Using bwrap sandbox for ${sbKey}`);
+    proc = sandbox.spawnInBwrap(sbKey, args, spawnEnv, pipePrompt ? fullPrompt : null);
   } else {
-    proc = spawn(config.claudePath, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd, env: spawnEnv });
+    // No isolation available — bare host spawn (fallback)
+    logger.warn('No sandbox available (Docker/bwrap) — running Claude without filesystem isolation');
+    if (pipePrompt) {
+      const hostArgs = args.filter(a => a !== '__PIPE_PROMPT__');
+      proc = spawn(config.claudePath, hostArgs, { stdio: ['pipe', 'pipe', 'pipe'], cwd, env: spawnEnv });
+      proc.stdin.write(fullPrompt);
+      proc.stdin.end();
+    } else {
+      proc = spawn(config.claudePath, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd, env: spawnEnv });
+    }
   }
 
   return new Promise((resolve, reject) => {
@@ -490,15 +619,34 @@ Do NOT attempt to use Resend tools — they are not available until the user con
       try {
         const json = JSON.parse(jsonToParse);
         if (json.session_id) {
-          sessions.set(chatId, json.session_id);
+          sessions.set(sessionKey, json.session_id);
           saveState();
           if (!hasSession) {
-            logger.info(`New session created: ${json.session_id}`);
+            logger.info(`New session created for ${agentId}: ${json.session_id}`);
+            activity.logSession(chatId, { agentId, action: 'create', sessionId: json.session_id });
           }
         }
-        // Parse token usage if available
+        // Parse token usage if available — capture full breakdown
         if (json.usage) {
-          tokens = { input: json.usage.input_tokens || 0, output: json.usage.output_tokens || 0 };
+          tokens = {
+            input: json.usage.input_tokens || 0,
+            output: json.usage.output_tokens || 0,
+            cacheCreation: json.usage.cache_creation_input_tokens || 0,
+            cacheRead: json.usage.cache_read_input_tokens || 0,
+          };
+        }
+        // Capture cost and API timing from Claude CLI
+        if (json.total_cost_usd != null) {
+          if (!tokens) tokens = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
+          tokens.costUsd = json.total_cost_usd;
+        }
+        if (json.duration_api_ms != null) {
+          if (!tokens) tokens = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
+          tokens.apiDurationMs = json.duration_api_ms;
+        }
+        if (json.num_turns != null) {
+          if (!tokens) tokens = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
+          tokens.numTurns = json.num_turns;
         }
         result = json.result || stdout;
       } catch (e) {
@@ -537,8 +685,11 @@ Do NOT attempt to use Resend tools — they are not available until the user con
 }
 
 function clearSession(chatId) {
-  sessions.delete(chatId);
+  const agentId = activeAgents.get(chatId) || agents.getDefaultAgentId();
+  const sessionKey = `${chatId}:${agentId}`;
+  sessions.delete(sessionKey);
   saveState();
+  activity.logSession(chatId, { agentId, action: 'reset' });
 }
 
 // Kill the active claude process for a chat (user-initiated stop)
@@ -580,6 +731,34 @@ function addTaskHistory(chatId, entry) {
   history.push(entry);
   if (history.length > 5) history.shift();
 
+  // Log task completion to activity tracker
+  const agentId = activeAgents.get(chatId) || agents.getDefaultAgentId();
+  activity.logTaskEnd(chatId, {
+    agentId,
+    status: entry.status,
+    durationSecs: entry.durationSecs,
+    tokens: entry.tokens,
+    model: getChatModel(chatId) || config.claudeModel,
+    error: entry.status === 'error' ? entry.prompt : null,
+  });
+
+  // Sync task delta to DB
+  const dbDelta = {
+    tasks: 1,
+    completedTasks: entry.status === 'completed' ? 1 : 0,
+    failedTasks: entry.status === 'error' ? 1 : 0,
+    stoppedTasks: entry.status === 'stopped' ? 1 : 0,
+    durationSecs: entry.durationSecs || 0,
+  };
+  if (entry.tokens) {
+    dbDelta.inputTokens = entry.tokens.input || 0;
+    dbDelta.outputTokens = entry.tokens.output || 0;
+    dbDelta.cacheCreationTokens = entry.tokens.cacheCreation || 0;
+    dbDelta.cacheReadTokens = entry.tokens.cacheRead || 0;
+    dbDelta.costUsd = entry.tokens.costUsd || 0;
+  }
+  activity.syncToDb(chatId, dbDelta);
+
   // Also accumulate lifetime token usage
   if (entry.tokens) {
     addTokenUsage(chatId, entry.tokens);
@@ -594,9 +773,15 @@ function getTaskHistory(chatId) {
 
 function addTokenUsage(chatId, tokens) {
   if (!tokens) return;
-  const c = tokenCounters.get(chatId) || { input: 0, output: 0, tasks: 0 };
+  const c = tokenCounters.get(chatId) || {
+    input: 0, output: 0, cacheCreation: 0, cacheRead: 0,
+    costUsd: 0, tasks: 0,
+  };
   c.input += tokens.input || 0;
   c.output += tokens.output || 0;
+  c.cacheCreation += tokens.cacheCreation || 0;
+  c.cacheRead += tokens.cacheRead || 0;
+  c.costUsd += tokens.costUsd || 0;
   c.tasks += 1;
   tokenCounters.set(chatId, c);
   saveState();
@@ -640,6 +825,18 @@ function removeSubscription(waId) {
 
 function getSubscribedUsers() {
   return [...subscribedUsers];
+}
+
+// ── Agent management ────────────────────────────────────────────────────────
+
+function getUserAgent(chatId) {
+  return activeAgents.get(chatId) || agents.getDefaultAgentId();
+}
+
+function setUserAgent(chatId, agentId) {
+  activeAgents.set(chatId, agentId);
+  saveState();
+  logger.info(`Agent set for ${chatId}: ${agentId}`);
 }
 
 // ── Group isolation ─────────────────────────────────────────────────────────
@@ -717,6 +914,7 @@ module.exports = {
   isSubscribed, addSubscription, removeSubscription, getSubscribedUsers,
   isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup,
   getSandboxKey,
+  getUserAgent, setUserAgent,
   setPendingTask, clearPendingTask, getPendingTasks,
   setPersistedQueue, getPersistedQueue, clearPersistedQueue,
 };

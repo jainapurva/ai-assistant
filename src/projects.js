@@ -25,44 +25,52 @@ const IGNORE_DIRS = new Set([
 ]);
 
 /**
- * Discover all projects that have Claude context (CLAUDE.md, memory, etc.)
+ * Discover projects that have Claude context (CLAUDE.md, memory, etc.)
+ * @param {string} [scopeDir] - If provided, only scan this directory for projects.
  * Returns array of { dir, name, hasClaudeMd, hasMemory }
  */
-function discoverProjects() {
+function discoverProjects(scopeDir) {
   const projects = new Map(); // resolved real path -> info
 
-  // 1. Scan for CLAUDE.md files in known directories
-  for (const scanDir of SCAN_DIRS) {
-    if (!fs.existsSync(scanDir)) continue;
-    scanForClaudeMd(scanDir, 3, projects);
-  }
+  if (scopeDir) {
+    // Scoped scan — only look within the given directory
+    if (fs.existsSync(scopeDir)) {
+      scanForClaudeMd(scopeDir, 3, projects);
+    }
+  } else {
+    // 1. Scan for CLAUDE.md files in known directories
+    for (const scanDir of SCAN_DIRS) {
+      if (!fs.existsSync(scanDir)) continue;
+      scanForClaudeMd(scanDir, 3, projects);
+    }
 
-  // 2. Check Claude's own projects/memory directory
-  if (fs.existsSync(CLAUDE_PROJECTS_DIR)) {
-    try {
-      const entries = fs.readdirSync(CLAUDE_PROJECTS_DIR);
-      for (const entry of entries) {
-        const decoded = decodeClaudeProjectPath(entry);
-        if (decoded && fs.existsSync(decoded)) {
-          const realDir = fs.realpathSync(decoded);
-          if (IGNORE_DIRS.has(realDir)) continue;
+    // 2. Check Claude's own projects/memory directory
+    if (fs.existsSync(CLAUDE_PROJECTS_DIR)) {
+      try {
+        const entries = fs.readdirSync(CLAUDE_PROJECTS_DIR);
+        for (const entry of entries) {
+          const decoded = decodeClaudeProjectPath(entry);
+          if (decoded && fs.existsSync(decoded)) {
+            const realDir = fs.realpathSync(decoded);
+            if (IGNORE_DIRS.has(realDir)) continue;
 
-          if (!projects.has(realDir)) {
-            projects.set(realDir, {
-              dir: realDir,
-              name: path.basename(realDir),
-              hasClaudeMd: fs.existsSync(path.join(realDir, 'CLAUDE.md')),
-              hasMemory: false,
-            });
-          }
-          const memDir = path.join(CLAUDE_PROJECTS_DIR, entry, 'memory');
-          if (fs.existsSync(memDir)) {
-            projects.get(realDir).hasMemory = true;
+            if (!projects.has(realDir)) {
+              projects.set(realDir, {
+                dir: realDir,
+                name: path.basename(realDir),
+                hasClaudeMd: fs.existsSync(path.join(realDir, 'CLAUDE.md')),
+                hasMemory: false,
+              });
+            }
+            const memDir = path.join(CLAUDE_PROJECTS_DIR, entry, 'memory');
+            if (fs.existsSync(memDir)) {
+              projects.get(realDir).hasMemory = true;
+            }
           }
         }
+      } catch (e) {
+        logger.warn('Failed to scan Claude projects dir:', e.message);
       }
-    } catch (e) {
-      logger.warn('Failed to scan Claude projects dir:', e.message);
     }
   }
 

@@ -8,7 +8,7 @@ Wants=ai-assistant-bot.service
 Type=simple
 User=ddarji
 Group=ddarji
-WorkingDirectory=/media/ddarji/storage/git/ai-assistant
+WorkingDirectory=/media/ddarji/storage/ai-assistant
 ExecStart=/home/ddarji/.nvm/versions/node/v20.20.0/bin/node src/watchdog/watchdog.js
 # systemd watches the watchdog — always restart it
 Restart=always

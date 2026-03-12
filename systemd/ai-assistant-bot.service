@@ -7,7 +7,7 @@ Wants=docker.service
 Type=simple
 User=ddarji
 Group=ddarji
-WorkingDirectory=/media/ddarji/storage/git/ai-assistant
+WorkingDirectory=/media/ddarji/storage/ai-assistant
 ExecStart=/home/ddarji/.nvm/versions/node/v20.20.0/bin/node src/index.js
 # Watchdog handles restarts with intelligence (circuit breaker, diagnostics)
 Restart=no

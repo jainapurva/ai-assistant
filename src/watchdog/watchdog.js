@@ -14,8 +14,7 @@ const fs = require('fs');
 const config = require('./config');
 const checks = require('./checks');
 const { alert, alertResolved } = require('./alerter');
-const { restart, isCircuitOpen } = require('./restart');
-const { attemptFix: fixClaudeAuth } = require('./claude-auth');
+// restart module kept but auto-restart is disabled — alert-only mode
 const { diagnose } = require('./diagnostics');
 
 // ── Failure counters ──
@@ -122,13 +121,7 @@ async function runChecks() {
     failureCounts.claudeAuth = 0;
   }
 
-  // ── Check 5: Stale sandbox credentials ──
-  const sandboxCreds = checks.checkStaleSandboxCredentials();
-  if (!sandboxCreds.ok) {
-    log('warn', `Sandbox credential fix: ${sandboxCreds.reason}`);
-  }
-
-  // ── Check 6: Stuck tasks ──
+  // ── Check 5: Stuck tasks ──
   const stuck = checks.checkStuckTasks();
   if (!stuck.ok) {
     failureCounts.stuckTasks++;
@@ -149,62 +142,24 @@ async function runChecks() {
 }
 
 /**
- * Handle a critical failure: alert + restart.
+ * Handle a critical failure: alert only (no auto-restart).
  */
 async function handleFailure(issueType, message) {
   previouslyFailing.add(issueType);
 
-  if (isCircuitOpen()) {
-    log('error', `Circuit breaker is open — not restarting. Issue: ${issueType}`);
-    const diagnosis = await diagnose(`Circuit breaker tripped. ${message}`);
-    await alert(issueType, `${message}\n\nCircuit breaker is OPEN (too many restarts).\nAuto-reset in ${config.circuitBreaker.cooldownMs / 60_000} min.\nManual reset: touch ${config.resetFile}\n\nDiagnosis:\n${diagnosis}`, { force: true });
-    return;
-  }
-
-  log('info', `Attempting restart for: ${issueType}`);
-  await alert(issueType, `${message}\n\nAttempting automatic restart...`);
-
-  const result = await restart();
-
-  if (result.success) {
-    log('info', `Restart successful via ${result.method}`);
-    // Reset failure counters on successful restart
-    failureCounts.processAlive = 0;
-    failureCounts.webhookPort = 0;
-    failureCounts.apiHealth = 0;
-    await alertResolved(issueType, `Bot restarted successfully via ${result.method}`);
-    previouslyFailing.delete(issueType);
-  } else {
-    log('error', `Restart failed: ${result.reason}`);
-
-    if (result.circuitTripped) {
-      const diagnosis = await diagnose(`Restart failed, circuit breaker tripped. ${message}. Restart error: ${result.reason}`);
-      await alert(issueType, `Restart failed — circuit breaker TRIPPED.\n\nReason: ${result.reason}\n\nDiagnosis:\n${diagnosis}`, { force: true });
-    } else {
-      await alert(issueType, `Restart failed: ${result.reason}`);
-    }
-  }
+  log('error', `Failure detected: ${issueType} — ${message}`);
+  const diagnosis = await diagnose(message);
+  await alert(issueType, `${message}\n\nManual intervention required — auto-restart is disabled.\n\nDiagnosis:\n${diagnosis}`);
 }
 
 /**
- * Handle Claude auth failure: try auto-fix, then alert.
+ * Handle Claude auth failure: alert only.
  */
 async function handleClaudeAuth(reason) {
   previouslyFailing.add('claude_auth');
-  log('info', 'Attempting Claude auth fix...');
-
-  const fix = await fixClaudeAuth();
-
-  if (fix.fixed) {
-    log('info', 'Claude auth fixed');
-    await alertResolved('claude_auth', fix.message);
-    previouslyFailing.delete('claude_auth');
-    failureCounts.claudeAuth = 0;
-  } else {
-    log('error', `Claude auth fix failed: ${fix.message}`);
-    const diagnosis = await diagnose(`Claude authentication failure: ${reason}. Auto-fix failed: ${fix.message}`);
-    await alert('claude_auth', `Claude auth expired: ${reason}\n\nAuto-fix failed.\n${fix.message}\n\nDiagnosis:\n${diagnosis}`);
-  }
+  log('error', `Claude auth failure: ${reason}`);
+  const diagnosis = await diagnose(`Claude authentication failure: ${reason}`);
+  await alert('claude_auth', `Claude auth expired: ${reason}\n\nManual fix required: run \`claude /login\`\n\nDiagnosis:\n${diagnosis}`);
 }
 
 /**
