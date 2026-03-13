@@ -254,6 +254,25 @@ function spawnInBwrap(chatId, claudeArgs, env, pipePrompt = null) {
     }
   }
 
+  // Write a sanitized credentials file (access token only, no refresh token).
+  // This prevents the sandbox from calling Anthropic's refresh endpoint, which
+  // would rotate the refresh token server-side and invalidate the host's copy.
+  try {
+    const creds = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
+    if (creds?.claudeAiOauth) {
+      const sanitized = {
+        claudeAiOauth: { ...creds.claudeAiOauth, refreshToken: undefined },
+      };
+      fs.writeFileSync(
+        path.join(claudeDir, '.credentials.json'),
+        JSON.stringify(sanitized, null, 2),
+        { mode: 0o600 }
+      );
+    }
+  } catch (err) {
+    logger.warn(`bwrap: failed to write sanitized credentials: ${err.message}`);
+  }
+
   // Build bwrap args: clean internal paths only
   const bwrapArgs = [
     // System libraries (read-only)
@@ -275,10 +294,8 @@ function spawnInBwrap(chatId, claudeArgs, env, pipePrompt = null) {
     '--ro-bind', claudeBinaryPath, CLAUDE_BIN,
     // Claude CLI config file (read-only)
     ...(fs.existsSync(CLAUDE_CONFIG_PATH) ? ['--ro-bind', CLAUDE_CONFIG_PATH, `${HOME}/.claude.json`] : []),
-    // Per-user .claude dir (writable — session data, history)
+    // Per-user .claude dir (writable — session data, history, sanitized credentials)
     '--bind', claudeDir, `${HOME}/.claude`,
-    // Host credentials (read-only overlay — prevents sandbox from consuming refresh tokens)
-    '--ro-bind', CREDENTIALS_PATH, `${HOME}/.claude/.credentials.json`,
     // User workspace (writable — the ONLY user-accessible data dir)
     '--bind', workspace, '/workspace',
     // Working directory
