@@ -23,7 +23,7 @@ jest.mock('fs', () => {
   };
 });
 
-const { hashChatId, getContainerName, getSandboxDir, cleanWorkspace } = require('../../src/sandbox');
+const { hashChatId, getSandboxDir, cleanWorkspace } = require('../../src/sandbox');
 const config = require('../../src/config');
 const fs = require('fs');
 
@@ -50,18 +50,6 @@ describe('hashChatId', () => {
     const chatId = '9876543210@c.us';
     const expected = crypto.createHash('sha256').update(chatId).digest('hex').slice(0, 12);
     expect(hashChatId(chatId)).toBe(expected);
-  });
-});
-
-describe('getContainerName', () => {
-  test('starts with ai-sandbox- prefix', () => {
-    const name = getContainerName('1234567890@c.us');
-    expect(name).toMatch(/^ai-sandbox-[a-f0-9]{12}$/);
-  });
-
-  test('is a valid Docker container name (no special chars)', () => {
-    const name = getContainerName('1234567890@c.us');
-    expect(name).toMatch(/^[a-z0-9-]+$/);
   });
 });
 

@@ -41,7 +41,7 @@ const greetedChats = new Set();
 // Users with active subscriptions (phone numbers like "1234567890@c.us")
 const subscribedUsers = new Set();
 
-// Groups with their own isolated Docker container (keyed by chatId instead of senderId)
+// Groups with their own isolated sandbox (keyed by chatId instead of senderId)
 const isolatedGroups = new Set();
 
 // Task persistence for crash recovery
@@ -275,8 +275,7 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false, opts = {}
     '--output-format', 'json',
   ];
 
-  const useSandbox = config.sandboxEnabled && sandbox.isDockerAvailable();
-  const useBwrap = !useSandbox && sandbox.isBwrapAvailable();
+  const useBwrap = config.sandboxEnabled && sandbox.isBwrapAvailable();
 
   // Agent-aware session key: chatId:agentId
   const agentId = activeAgents.get(chatId) || agents.getDefaultAgentId();
@@ -298,10 +297,10 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false, opts = {}
   let googlePrompt = '';
   let mcpConfig = null;
 
-  // Determine paths based on whether we're in a sandbox (Docker or bwrap)
-  const sandboxed = useSandbox || useBwrap;
-  const nodePath = useSandbox ? '/usr/local/bin/node' : (useBwrap ? '/opt/node/bin/node' : config.nodeBinaryPath);
-  const apiUrl = useSandbox ? `http://host.docker.internal:${config.httpPort}` : `http://localhost:${config.httpPort}`;
+  // Determine paths based on whether we're in a sandbox (bwrap)
+  const sandboxed = useBwrap;
+  const nodePath = useBwrap ? '/opt/node/bin/node' : config.nodeBinaryPath;
+  const apiUrl = `http://localhost:${config.httpPort}`;
 
   // Resend MCP — per-user API key
   const resendApiKey = resendAuth.resolveApiKey(chatId);
@@ -494,7 +493,7 @@ NEVER force push or rewrite history. Only push to the default branch.
     }
   }
 
-  logger.info(`Spawning claude [${runningClaudeCount}/${MAX_CONCURRENT_CLAUDE}] in ${useSandbox ? 'sandbox' : cwd}: ${args.slice(0, -1).join(' ')} "<prompt>"`);
+  logger.info(`Spawning claude [${runningClaudeCount}/${MAX_CONCURRENT_CLAUDE}] in ${useBwrap ? 'bwrap' : cwd}: ${args.slice(0, -1).join(' ')} "<prompt>"`);
 
   const sbKey = sandboxKey || chatId;
 
@@ -505,25 +504,16 @@ NEVER force push or rewrite history. Only push to the default branch.
     sessionId,
     project: cwd,
     promptPreview: prompt.slice(0, 200),
-    sandbox: useSandbox ? 'docker' : (useBwrap ? 'bwrap' : 'none'),
+    sandbox: useBwrap ? 'bwrap' : 'none',
   });
 
   let proc;
-  if (useSandbox) {
-    try {
-      proc = await sandbox.spawnInContainer(sbKey, args, spawnEnv, pipePrompt ? fullPrompt : null);
-      sandbox.markContainerUsed(sbKey);
-    } catch (err) {
-      logger.warn(`sandbox: fallback to host: ${err.message}`);
-      proc = spawn(config.claudePath, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd, env: spawnEnv });
-    }
-  } else if (sandbox.isBwrapAvailable()) {
-    // Bubblewrap sandbox — kernel-level filesystem isolation without Docker
+  if (useBwrap) {
     logger.info(`Using bwrap sandbox for ${sbKey}`);
     proc = sandbox.spawnInBwrap(sbKey, args, spawnEnv, pipePrompt ? fullPrompt : null);
   } else {
     // No isolation available — bare host spawn (fallback)
-    logger.warn('No sandbox available (Docker/bwrap) — running Claude without filesystem isolation');
+    logger.warn('No sandbox available (bwrap) — running Claude without filesystem isolation');
     if (pipePrompt) {
       const hostArgs = args.filter(a => a !== '__PIPE_PROMPT__');
       proc = spawn(config.claudePath, hostArgs, { stdio: ['pipe', 'pipe', 'pipe'], cwd, env: spawnEnv });
@@ -857,9 +847,9 @@ function removeIsolatedGroup(chatId) {
 
 /**
  * Determine the sandbox key for a chat.
- * - DMs: senderId (one Docker per user)
- * - Groups (default): owner's senderId (same Docker as their DM)
- * - Groups (isolated): chatId (group gets its own Docker)
+ * - DMs: senderId (one sandbox per user)
+ * - Groups (default): owner's senderId (same sandbox as their DM)
+ * - Groups (isolated): chatId (group gets its own sandbox)
  */
 function getSandboxKey(chatId, senderId) {
   if (isGroupChat(chatId) && isIsolatedGroup(chatId)) {

@@ -20,7 +20,7 @@ const chatLogger = require('./chat-logger');
 const activity = require('./activity-logger');
 const { sanitizePaths } = require('./security');
 
-// ── PID file for watchdog (written after ports bind, see bottom of file) ──
+// ── PID file (written after ports bind, see bottom of file) ──
 const PID_FILE = path.join(
   process.env.BOT_STATE_DIR || '/media/ddarji/storage/ai-assistant',
   'bot.pid'
@@ -267,7 +267,7 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
 
     // Snapshot workspace files before Claude runs (for detecting new output files)
     // Only enabled when sandbox is active — never scan host filesystem
-    const useSandbox = config.sandboxEnabled && sandbox.isDockerAvailable();
+    const useSandbox = config.sandboxEnabled && sandbox.isBwrapAvailable();
     let workspaceDir = null;
     let filesBefore = new Map(); // filename -> mtime
     if (useSandbox) {
@@ -924,9 +924,6 @@ provider.on('message', async (msg) => {
       if (batch && batch.timer) clearTimeout(batch.timer);
       mediaBatch.delete(chatId);
       messageQueue.delete(chatId);
-      if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
-        sandbox.removeContainer(chatId);
-      }
       await botReply(msg, '🔄 Session, project, queue, sandbox, and usage counter cleared. Starting fresh.');
       return;
     }
@@ -959,9 +956,9 @@ provider.on('message', async (msg) => {
       statusText += `\nProject: ${projName}`;
 
       // Show sandbox info if enabled
-      if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
+      if (config.sandboxEnabled && sandbox.isBwrapAvailable()) {
         const sbStatus = sandbox.getSandboxStatus(chatId);
-        statusText += `\n\n🐳 *Sandbox:* ${sbStatus.status}`;
+        statusText += `\n\n🔒 *Sandbox:* ${sbStatus.status}`;
         if (sbStatus.exists) {
           statusText += ` (${sbStatus.diskUsageMB}MB / ${sbStatus.maxDiskMB}MB)`;
         }
@@ -1061,8 +1058,8 @@ provider.on('message', async (msg) => {
     // /sandbox [clean|reset] — sandbox status and management
     const sandboxMatch = caption.match(/^\/sandbox(?:\s+(clean|reset))?$/i);
     if (sandboxMatch) {
-      if (!config.sandboxEnabled || !sandbox.isDockerAvailable()) {
-        await botReply(msg, '🐳 Sandbox is not enabled or Docker is unavailable.');
+      if (!config.sandboxEnabled || !sandbox.isBwrapAvailable()) {
+        await botReply(msg, '🔒 Sandbox is not enabled or bwrap is unavailable.');
         return;
       }
       const action = sandboxMatch[1] ? sandboxMatch[1].toLowerCase() : null;
@@ -1078,15 +1075,13 @@ provider.on('message', async (msg) => {
           await botReply(msg, '🔒 Only admins can reset sandboxes.');
           return;
         }
-        sandbox.removeContainer(chatId);
-        await botReply(msg, '🐳 Sandbox container removed. A fresh one will be created on next message.');
+        await botReply(msg, '🔒 Sandbox workspace reset. A fresh one will be created on next message.');
         return;
       }
 
       // Default: show status
       const status = sandbox.getSandboxStatus(chatId);
-      let text = `🐳 *Sandbox Status*\n\n`;
-      text += `Container: \`${status.containerName}\`\n`;
+      let text = `🔒 *Sandbox Status*\n\n`;
       text += `Status: ${status.status}\n`;
       text += `Disk: ${status.diskUsageMB}MB / ${status.maxDiskMB}MB\n`;
       if (status.diskUsageMB > status.maxDiskMB) {
@@ -1139,7 +1134,7 @@ provider.on('message', async (msg) => {
       return;
     }
 
-    // /isolate — give this group its own Docker container
+    // /isolate — give this group its own sandbox
     if (caption.toLowerCase() === '/isolate') {
       if (!isGroup) {
         await botReply(msg, '🐳 /isolate is only for group chats. Your DM already has its own sandbox.');
@@ -1150,28 +1145,20 @@ provider.on('message', async (msg) => {
         return;
       }
       setIsolatedGroup(chatId);
-      // Remove the old container (was keyed by senderId), fresh one will be created
-      if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
-        sandbox.removeContainer(chatId);
-      }
       clearSession(chatId);
       await botReply(msg, '🐳 Group isolated! This group now has its own separate sandbox.\nSession reset for fresh start.');
       return;
     }
 
-    // /unisolate — merge group back to user's personal Docker
+    // /unisolate — merge group back to user's personal sandbox
     if (caption.toLowerCase() === '/unisolate') {
       if (!isGroup) {
-        await botReply(msg, '🐳 /unisolate is only for group chats.');
+        await botReply(msg, '🔒 /unisolate is only for group chats.');
         return;
       }
       if (!isIsolatedGroup(chatId)) {
-        await botReply(msg, '🐳 This group already shares your personal sandbox.');
+        await botReply(msg, '🔒 This group already shares your personal sandbox.');
         return;
-      }
-      // Clean up the isolated container
-      if (config.sandboxEnabled && sandbox.isDockerAvailable()) {
-        sandbox.removeContainer(chatId);
       }
       removeIsolatedGroup(chatId);
       clearSession(chatId);
@@ -1246,7 +1233,7 @@ provider.on('message', async (msg) => {
 
     // /files — list files in the workspace (sandbox-only for security)
     if (caption.toLowerCase() === '/files') {
-      if (!config.sandboxEnabled || !sandbox.isDockerAvailable()) {
+      if (!config.sandboxEnabled || !sandbox.isBwrapAvailable()) {
         await botReply(msg, '📂 Your session is not active yet. Send me a message first and I\'ll set up your workspace.');
         return;
       }
@@ -1934,7 +1921,7 @@ provider.on('message', async (msg) => {
       }
 
       // Copy media into the user's workspace so Claude can access it inside the sandbox
-      const useSandbox = config.sandboxEnabled && (sandbox.isDockerAvailable() || sandbox.isBwrapAvailable());
+      const useSandbox = config.sandboxEnabled && sandbox.isBwrapAvailable();
       const mediaPaths = []; // host paths for cleanup (only temp files, NOT workspace copies)
 
       for (const p of paths) {

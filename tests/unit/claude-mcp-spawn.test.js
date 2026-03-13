@@ -14,8 +14,8 @@ const { Readable } = require('stream');
 
 // ── Track spawn calls ───────────────────────────────────────────────────────
 
-let mockLastContainerArgs = null;
-let mockLastContainerPipePrompt = null;
+let mockLastBwrapArgs = null;
+let mockLastBwrapPipePrompt = null;
 let mockLastSpawnArgs = null;
 let mockLastSpawnOpts = null;
 let mockProc = null;
@@ -24,6 +24,7 @@ function mockCreateProc() {
   const proc = new EventEmitter();
   proc.stdout = new Readable({ read() {} });
   proc.stderr = new Readable({ read() {} });
+  proc.stdin = { write: jest.fn(), end: jest.fn() };
   proc._stoppedByUser = false;
   proc.kill = jest.fn();
   mockProc = proc;
@@ -44,14 +45,12 @@ jest.mock('child_process', () => ({
 // ── Mock sandbox ────────────────────────────────────────────────────────────
 
 jest.mock('../../src/sandbox', () => ({
-  isDockerAvailable: jest.fn(() => true),
-  isBwrapAvailable: jest.fn(() => false),
-  spawnInContainer: jest.fn((chatId, args, env, pipePrompt) => {
-    mockLastContainerArgs = args;
-    mockLastContainerPipePrompt = pipePrompt;
-    return Promise.resolve(mockCreateProc());
+  isBwrapAvailable: jest.fn(() => true),
+  spawnInBwrap: jest.fn((chatId, args, env, pipePrompt) => {
+    mockLastBwrapArgs = args;
+    mockLastBwrapPipePrompt = pipePrompt;
+    return mockCreateProc();
   }),
-  markContainerUsed: jest.fn(),
   ensureSandboxDirs: jest.fn((chatId) => ({
     base: '/tmp/test-sandbox',
     workspace: '/tmp/test-sandbox/workspace',
@@ -173,8 +172,8 @@ function resolveProc(result = 'test response') {
 }
 
 beforeEach(() => {
-  mockLastContainerArgs = null;
-  mockLastContainerPipePrompt = null;
+  mockLastBwrapArgs = null;
+  mockLastBwrapPipePrompt = null;
   mockLastSpawnArgs = null;
   mockLastSpawnOpts = null;
   mockProc = null;
@@ -191,13 +190,13 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     resolveProc();
     await runClaude('hello', 'chat1', 'chat1');
 
-    expect(sandbox.spawnInContainer).toHaveBeenCalled();
-    const args = mockLastContainerArgs;
+    expect(sandbox.spawnInBwrap).toHaveBeenCalled();
+    const args = mockLastBwrapArgs;
 
     // Prompt should be the last argument (contains "hello")
     expect(args[args.length - 1]).toContain('hello');
     // pipePrompt should be null
-    expect(mockLastContainerPipePrompt).toBeNull();
+    expect(mockLastBwrapPipePrompt).toBeNull();
   });
 
   test('with MCP: --mcp-config in args, pipePrompt contains the prompt', async () => {
@@ -207,7 +206,7 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     resolveProc();
     await runClaude('check inbox', 'chat2', 'chat2');
 
-    const args = mockLastContainerArgs;
+    const args = mockLastBwrapArgs;
 
     // --mcp-config should be in args with valid JSON
     expect(args).toContain('--mcp-config');
@@ -219,8 +218,8 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     expect(args[args.length - 1]).toBe('__PIPE_PROMPT__');
 
     // pipePrompt should contain the actual prompt text
-    expect(mockLastContainerPipePrompt).toContain('check inbox');
-    expect(mockLastContainerPipePrompt).not.toBeNull();
+    expect(mockLastBwrapPipePrompt).toContain('check inbox');
+    expect(mockLastBwrapPipePrompt).not.toBeNull();
   });
 
   test('Google configured but NOT connected: no MCP, prompt as CLI arg', async () => {
@@ -230,11 +229,11 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     resolveProc();
     await runClaude('hello', 'chat3', 'chat3');
 
-    const args = mockLastContainerArgs;
+    const args = mockLastBwrapArgs;
 
     expect(args).not.toContain('--mcp-config');
     expect(args[args.length - 1]).toContain('hello');
-    expect(mockLastContainerPipePrompt).toBeNull();
+    expect(mockLastBwrapPipePrompt).toBeNull();
   });
 
   test('MCP config has correct container paths and chatId', async () => {
@@ -244,28 +243,28 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     resolveProc();
     await runClaude('test', 'user-555@c.us', 'user-555@c.us');
 
-    const args = mockLastContainerArgs;
+    const args = mockLastBwrapArgs;
     const mcpJson = JSON.parse(args[args.indexOf('--mcp-config') + 1]);
     const google = mcpJson.mcpServers.google;
 
-    expect(google.command).toBe('/usr/local/bin/node');
+    expect(google.command).toBe('/opt/node/bin/node');
     expect(google.args[0]).toBe('/opt/mcp/google-mcp-server.js');
-    expect(google.env.BOT_API_URL).toContain('host.docker.internal');
+    expect(google.env.BOT_API_URL).toContain('localhost');
     expect(google.env.CHAT_ID).toBe('user-555@c.us');
   });
 
-  test('host fallback with MCP: still passes prompt as CLI arg (no shell pipe on host)', async () => {
+  test('host fallback with MCP when bwrap unavailable: prompt piped via stdin', async () => {
     mockGoogleAuth.isConfigured.mockReturnValue(true);
     mockGoogleAuth.getStatus.mockReturnValue({ connected: true, email: 'a@b.com' });
-    sandbox.spawnInContainer.mockRejectedValueOnce(new Error('docker unavailable'));
+    sandbox.isBwrapAvailable.mockReturnValueOnce(false);
 
     resolveProc();
     await runClaude('test', 'chat5', 'chat5');
 
-    // Falls back to direct spawn — stdin is ignore (host doesn't need shell pipe)
+    // Falls back to direct spawn — with MCP, prompt is piped via stdin
     const { spawn } = require('child_process');
     expect(spawn).toHaveBeenCalled();
-    expect(mockLastSpawnOpts.stdio[0]).toBe('ignore');
+    expect(mockLastSpawnOpts.stdio[0]).toBe('pipe');
   });
 
   test('Resend MCP: added to mcpServers when user has Resend key', async () => {
@@ -275,7 +274,7 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     resolveProc();
     await runClaude('send email', 'chat6', 'chat6');
 
-    const args = mockLastContainerArgs;
+    const args = mockLastBwrapArgs;
 
     // --mcp-config should be present (Resend alone triggers MCP)
     expect(args).toContain('--mcp-config');
@@ -283,7 +282,7 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     const mcpJson = JSON.parse(args[mcpIdx + 1]);
 
     expect(mcpJson.mcpServers.resend).toBeDefined();
-    expect(mcpJson.mcpServers.resend.command).toBe('/usr/local/bin/node');
+    expect(mcpJson.mcpServers.resend.command).toBe('/opt/node/bin/node');
     expect(mcpJson.mcpServers.resend.args[0]).toBe('/opt/mcp/resend-mcp-server.mjs');
     expect(mcpJson.mcpServers.resend.env.RESEND_API_KEY).toBe('re_test_key_123');
 
@@ -291,7 +290,7 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     expect(mcpJson.mcpServers.google).toBeUndefined();
 
     // pipePrompt should be set (MCP active)
-    expect(mockLastContainerPipePrompt).toContain('send email');
+    expect(mockLastBwrapPipePrompt).toContain('send email');
   });
 
   test('Resend + Google MCP: both present when both configured', async () => {
@@ -302,7 +301,7 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     resolveProc();
     await runClaude('send email and check drive', 'chat7', 'chat7');
 
-    const args = mockLastContainerArgs;
+    const args = mockLastBwrapArgs;
     const mcpJson = JSON.parse(args[args.indexOf('--mcp-config') + 1]);
 
     // Both MCP servers present
@@ -319,10 +318,10 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     resolveProc();
     await runClaude('hello', 'chat8', 'chat8');
 
-    const args = mockLastContainerArgs;
+    const args = mockLastBwrapArgs;
     expect(args).not.toContain('--mcp-config');
     expect(args[args.length - 1]).toContain('hello');
-    expect(mockLastContainerPipePrompt).toBeNull();
+    expect(mockLastBwrapPipePrompt).toBeNull();
   });
 
   test('no user Resend key: prompt tells user about /resend setup', async () => {
@@ -332,7 +331,7 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     resolveProc();
     await runClaude('send email via resend', 'chat9', 'chat9');
 
-    const args = mockLastContainerArgs;
+    const args = mockLastBwrapArgs;
     expect(args).not.toContain('--mcp-config');
     // The prompt should mention /resend
     expect(args[args.length - 1]).toContain('/resend');
@@ -348,12 +347,12 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     resolveProc();
     await runClaude('check outlook inbox', 'chat-outlook-1', 'chat-outlook-1');
 
-    const args = mockLastContainerArgs;
+    const args = mockLastBwrapArgs;
     expect(args).toContain('--mcp-config');
     const mcpJson = JSON.parse(args[args.indexOf('--mcp-config') + 1]);
     expect(mcpJson.mcpServers.outlook).toBeDefined();
     expect(mcpJson.mcpServers.outlook.env.CHAT_ID).toBe('chat-outlook-1');
-    expect(mockLastContainerPipePrompt).toContain('check outlook inbox');
+    expect(mockLastBwrapPipePrompt).toContain('check outlook inbox');
   });
 
   test('Outlook configured but NOT connected: no Outlook MCP', async () => {
@@ -364,7 +363,7 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     resolveProc();
     await runClaude('hello', 'chat-outlook-2', 'chat-outlook-2');
 
-    const args = mockLastContainerArgs;
+    const args = mockLastBwrapArgs;
     // No MCP config at all (only Outlook configured but not connected)
     expect(args).not.toContain('--mcp-config');
   });
@@ -379,7 +378,7 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     resolveProc();
     await runClaude('send emails everywhere', 'chat-all', 'chat-all');
 
-    const args = mockLastContainerArgs;
+    const args = mockLastBwrapArgs;
     const mcpJson = JSON.parse(args[args.indexOf('--mcp-config') + 1]);
 
     expect(mcpJson.mcpServers.google).toBeDefined();

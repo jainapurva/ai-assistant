@@ -25,7 +25,7 @@ module.exports = {
   webhookPort: parseInt(process.env.WEBHOOK_PORT || '3000', 10),
   // Open access mode: when true, all DMs are allowed (standalone bot)
   openAccess: process.env.OPEN_ACCESS !== 'false',
-  // Docker sandbox settings
+  // Sandbox settings
   sandboxEnabled: process.env.SANDBOX_ENABLED === 'true',
   sandboxBaseDir: process.env.SANDBOX_BASE_DIR || '/media/ddarji/storage/ai-assistant/sandboxes',
   sandboxMemory: process.env.SANDBOX_MEMORY || '512m',
@@ -41,7 +41,7 @@ module.exports = {
   microsoftClientId: process.env.MICROSOFT_CLIENT_ID || '',
   microsoftClientSecret: process.env.MICROSOFT_CLIENT_SECRET || '',
   microsoftRedirectUri: process.env.MICROSOFT_REDIRECT_URI || '',
-  // MCP server paths (for Google integration inside Docker sandboxes)
+  // MCP server paths (for Google integration inside sandboxes)
   nodeBinaryPath: process.env.NODE_BINARY_PATH || '/home/ddarji/.nvm/versions/node/v20.20.0/bin/node',
   mcpServerPath: process.env.MCP_SERVER_PATH || path.join(__dirname, '..', 'dist', 'google-mcp-server.bundle.js'),
   // GitHub App (for repo management via Website Manager agent)

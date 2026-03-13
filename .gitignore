@@ -19,7 +19,6 @@ resend-keys.json
 logs/
 sandboxes/
 activity/
-watchdog_reset
 dist/
 
 # Claude config (local)
