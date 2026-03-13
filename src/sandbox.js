@@ -20,6 +20,58 @@ const CLAUDE_CONFIG_PATH = path.join(process.env.HOME || '/home/ddarji', '.claud
 
 // Timer handles for cleanup on shutdown
 let diskMonitorTimer = null;
+let tokenRefreshTimer = null;
+
+// ── Proactive Claude OAuth token refresh ─────────────────────────────────────
+// Claude CLI's OAuth access token expires periodically. When it does, the CLI
+// uses the refresh token to get a new pair — but inside a bwrap sandbox the
+// credentials file is read-only, so the new tokens can't be persisted. Worse,
+// Anthropic rotates the refresh token on each use, invalidating the host copy.
+//
+// Fix: periodically run `claude --version` on the HOST (not sandboxed) which
+// triggers the CLI's built-in token refresh and writes back to the host file.
+const TOKEN_REFRESH_THRESHOLD_MS = 2 * 60 * 60 * 1000; // refresh if <2h left
+const TOKEN_CHECK_INTERVAL_MS = 60 * 60 * 1000;        // check every 1h
+
+function checkAndRefreshToken() {
+  try {
+    if (!fs.existsSync(CREDENTIALS_PATH)) return;
+    const creds = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
+    const expiresAt = creds?.claudeAiOauth?.expiresAt;
+    if (!expiresAt) return;
+
+    const timeLeft = expiresAt - Date.now();
+    const hoursLeft = (timeLeft / 3600000).toFixed(1);
+
+    if (timeLeft <= 0) {
+      logger.warn(`token-refresh: access token EXPIRED ${(-timeLeft / 3600000).toFixed(1)}h ago, attempting refresh...`);
+    } else if (timeLeft < TOKEN_REFRESH_THRESHOLD_MS) {
+      logger.info(`token-refresh: access token expires in ${hoursLeft}h, refreshing proactively...`);
+    } else {
+      logger.info(`token-refresh: access token valid for ${hoursLeft}h, no action needed`);
+      return;
+    }
+
+    // Run `claude --version` on the HOST to trigger CLI's built-in refresh
+    execFileSync(config.claudePath, ['--version'], {
+      stdio: 'ignore',
+      timeout: 30000,
+      env: { ...process.env, HOME: process.env.HOME || '/home/ddarji' },
+    });
+
+    // Verify the token was actually refreshed
+    const updated = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
+    const newExpiry = updated?.claudeAiOauth?.expiresAt;
+    if (newExpiry && newExpiry > expiresAt) {
+      const newHoursLeft = ((newExpiry - Date.now()) / 3600000).toFixed(1);
+      logger.info(`token-refresh: success — new token valid for ${newHoursLeft}h`);
+    } else {
+      logger.warn('token-refresh: ran claude --version but token expiry unchanged');
+    }
+  } catch (err) {
+    logger.error(`token-refresh: failed — ${err.message}`);
+  }
+}
 
 function hashChatId(chatId) {
   return crypto.createHash('sha256').update(chatId).digest('hex').slice(0, 12);
@@ -136,7 +188,12 @@ function init() {
   diskMonitorTimer = setInterval(checkDiskUsage, 5 * 60 * 1000);
   diskMonitorTimer.unref();
 
-  logger.info('sandbox: initialized (disk monitor 5m)');
+  // Proactive token refresh — check every hour, refresh if <2h left
+  checkAndRefreshToken(); // run immediately on startup
+  tokenRefreshTimer = setInterval(checkAndRefreshToken, TOKEN_CHECK_INTERVAL_MS);
+  tokenRefreshTimer.unref();
+
+  logger.info('sandbox: initialized (disk monitor 5m, token refresh 1h)');
 }
 
 /**
@@ -144,6 +201,7 @@ function init() {
  */
 function shutdown() {
   if (diskMonitorTimer) clearInterval(diskMonitorTimer);
+  if (tokenRefreshTimer) clearInterval(tokenRefreshTimer);
 }
 
 // ── Bubblewrap (bwrap) lightweight sandbox ──────────────────────────────────
