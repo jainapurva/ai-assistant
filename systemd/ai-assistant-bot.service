@@ -1,7 +1,6 @@
 [Unit]
 Description=AI Assistant WhatsApp Bot
-After=network.target docker.service
-Wants=docker.service
+After=network.target
 
 [Service]
 Type=simple
@@ -9,8 +8,10 @@ User=ddarji
 Group=ddarji
 WorkingDirectory=/media/ddarji/storage/ai-assistant
 ExecStart=/home/ddarji/.nvm/versions/node/v20.20.0/bin/node src/index.js
-# Watchdog handles restarts with intelligence (circuit breaker, diagnostics)
-Restart=no
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
 StandardOutput=append:/media/ddarji/storage/ai-assistant/bot.log
 StandardError=append:/media/ddarji/storage/ai-assistant/bot.log
 Environment=NODE_ENV=production
