@@ -46,7 +46,7 @@ module.exports = {
   mcpServerPath: process.env.MCP_SERVER_PATH || path.join(__dirname, '..', 'dist', 'google-mcp-server.bundle.js'),
   // GitHub App (for repo management via Website Manager agent)
   githubAppId: process.env.GITHUB_APP_ID || '',
-  githubAppSlug: process.env.GITHUB_APP_SLUG || 'swayat-ai-assistant',
+  githubAppSlug: process.env.GITHUB_APP_SLUG || 'swayat-ai',
   githubClientId: process.env.GITHUB_CLIENT_ID || '',
   githubClientSecret: process.env.GITHUB_CLIENT_SECRET || '',
   githubPrivateKeyPath: process.env.GITHUB_PRIVATE_KEY_PATH || '',
@@ -58,4 +58,26 @@ module.exports = {
   playwrightBrowsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH || '/media/ddarji/storage/.cache/playwright',
   // Outlook MCP server path
   outlookMcpServerPath: process.env.OUTLOOK_MCP_SERVER_PATH || path.join(__dirname, '..', 'dist', 'outlook-mcp-server.bundle.js'),
+  // GitHub MCP server path
+  githubMcpServerPath: process.env.GITHUB_MCP_SERVER_PATH || path.join(__dirname, '..', 'dist', 'github-mcp-server.bundle.js'),
+  // Trading MCP server path (paper trading)
+  tradingMcpPath: process.env.TRADING_MCP_PATH || path.join(__dirname, '..', 'dist', 'trading-mcp-server.bundle.js'),
+  // Job Hunter MCP server path
+  jobHunterMcpPath: process.env.JOB_HUNTER_MCP_PATH || path.join(__dirname, '..', 'dist', 'job-hunter-mcp-server.bundle.js'),
+  // JSearch API key (RapidAPI) — optional, free APIs work without it
+  jsearchApiKey: process.env.JSEARCH_API_KEY || '',
+  // Real Estate MCP server path
+  realestateMcpPath: process.env.REALESTATE_MCP_PATH || path.join(__dirname, '..', 'dist', 'realestate-mcp-server.bundle.js'),
+  // Real Estate external API keys
+  fubApiKey: process.env.FUB_API_KEY || '',
+  mlsApiUrl: process.env.MLS_API_URL || '',
+  mlsApiToken: process.env.MLS_API_TOKEN || '',
+  attomApiKey: process.env.ATTOM_API_KEY || '',
+  walkscoreApiKey: process.env.WALKSCORE_API_KEY || '',
+  greatschoolsApiKey: process.env.GREATSCHOOLS_API_KEY || '',
+  fredApiKey: process.env.FRED_API_KEY || '',
+  // FreeTools social publishing MCP server path
+  freetoolsMcpPath: process.env.FREETOOLS_MCP_PATH || path.join(__dirname, '..', 'dist', 'freetools-mcp-server.bundle.js'),
+  // Public base URL for the webhook server (cloudflare tunnel) — used for serving media files
+  webhookBaseUrl: process.env.WEBHOOK_BASE_URL || '',
 };

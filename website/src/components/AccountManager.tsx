@@ -1,10 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
-import { countryCodes } from "@/lib/country-codes";
 
 const CardForm = dynamic(() => import("./CardForm"), { ssr: false });
+
+interface UserInfo {
+  name: string;
+  email: string;
+  phone: string;
+  brokerage?: string;
+  license?: string;
+}
 
 interface SubscriptionData {
   phone: string;
@@ -49,9 +57,9 @@ function formatDate(dateStr: string | null): string {
 }
 
 export default function AccountManager() {
-  const [countryDial, setCountryDial] = useState("+1");
-  const [phone, setPhone] = useState("");
-  const [loading, setLoading] = useState(false);
+  const router = useRouter();
+  const [user, setUser] = useState<UserInfo | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [data, setData] = useState<SubscriptionData | null>(null);
   const [canceling, setCanceling] = useState(false);
@@ -60,37 +68,62 @@ export default function AccountManager() {
   const [updatingCard, setUpdatingCard] = useState(false);
   const [message, setMessage] = useState("");
 
-  const fullPhone = countryDial + phone.replace(/[\s\-().]/g, "");
+  // Verify session and auto-fetch subscription data
+  useEffect(() => {
+    const token = localStorage.getItem("swayat_dashboard_token");
+    if (!token) {
+      router.replace("/signin");
+      return;
+    }
 
-  const lookupAccount = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError("");
-    setData(null);
-    setMessage("");
-    setLoading(true);
+    fetch("/api/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    })
+      .then((r) => r.json())
+      .then((json) => {
+        if (!json.valid) {
+          localStorage.removeItem("swayat_dashboard_token");
+          router.replace("/signin");
+          return;
+        }
+        setUser(json.user);
+        // Auto-fetch subscription using the user's phone
+        if (json.user.phone) {
+          fetchSubscription(json.user.phone);
+        } else {
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        localStorage.removeItem("swayat_dashboard_token");
+        router.replace("/signin");
+      });
+  }, [router]);
 
+  async function fetchSubscription(phone: string) {
     try {
       const res = await fetch("/api/subscription/status", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: fullPhone }),
+        body: JSON.stringify({ phone }),
       });
       const result = await res.json();
-
-      if (!res.ok) {
-        setError(result.error || "Account not found");
-        return;
+      if (res.ok) {
+        setData(result);
+      } else {
+        setError(result.error || "Could not load subscription info");
       }
-
-      setData(result);
     } catch {
       setError("Network error. Please try again.");
     } finally {
       setLoading(false);
     }
-  };
+  }
 
   const handleCancel = async () => {
+    if (!user?.phone) return;
     setCanceling(true);
     setMessage("");
     setError("");
@@ -99,7 +132,7 @@ export default function AccountManager() {
       const res = await fetch("/api/subscription/cancel", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: fullPhone }),
+        body: JSON.stringify({ phone: user.phone }),
       });
       const result = await res.json();
 
@@ -123,6 +156,7 @@ export default function AccountManager() {
   };
 
   const handleCardUpdate = async (token: string) => {
+    if (!user?.phone) return;
     setUpdatingCard(true);
     setMessage("");
     setError("");
@@ -131,7 +165,7 @@ export default function AccountManager() {
       const res = await fetch("/api/subscription/update-card", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: fullPhone, paymentToken: token }),
+        body: JSON.stringify({ phone: user.phone, paymentToken: token }),
       });
       const result = await res.json();
 
@@ -149,6 +183,33 @@ export default function AccountManager() {
     }
   };
 
+  function handleSignOut() {
+    localStorage.removeItem("swayat_dashboard_token");
+    router.replace("/signin");
+  }
+
+  if (loading) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="text-center">
+          <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-primary border-r-transparent"></div>
+          <p className="mt-3 text-sm text-muted">Loading account...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="text-center">
+          <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-primary border-r-transparent"></div>
+          <p className="mt-3 text-sm text-muted">Redirecting...</p>
+        </div>
+      </div>
+    );
+  }
+
   const badge = data
     ? STATUS_BADGES[data.subscriptionStatus] || STATUS_BADGES.active
     : null;
@@ -159,41 +220,38 @@ export default function AccountManager() {
         <h1 className="text-center text-3xl font-bold text-heading">
           Manage Your <span className="text-primary">Account</span>
         </h1>
-        <p className="mt-3 text-center text-body">
-          Enter your WhatsApp number to view your subscription.
-        </p>
 
-        {/* Phone lookup form */}
-        <form onSubmit={lookupAccount} className="mt-8 space-y-4">
-          <div className="flex gap-2">
-            <select
-              value={countryDial}
-              onChange={(e) => setCountryDial(e.target.value)}
-              className="w-[120px] shrink-0 rounded-xl border border-slate-300 bg-white px-3 py-3 text-heading outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
-            >
-              {countryCodes.map((c) => (
-                <option key={`${c.code}-${c.dial}`} value={c.dial}>
-                  {c.flag} {c.dial}
-                </option>
-              ))}
-            </select>
-            <input
-              type="tel"
-              placeholder="555 123 4567"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              required
-              className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-heading placeholder-muted outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
-            />
+        {/* User info */}
+        <div className="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary text-white font-semibold text-sm">
+                {user.name.split(" ").map(n => n[0]).join("")}
+              </div>
+              <div>
+                <p className="font-medium text-heading">{user.name}</p>
+                <p className="text-sm text-muted">{user.email}</p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <a
+                href="/dashboard"
+                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-muted hover:text-heading hover:border-slate-400 transition"
+              >
+                Dashboard
+              </a>
+              <button
+                onClick={handleSignOut}
+                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-muted hover:text-heading hover:border-slate-400 transition"
+              >
+                Sign Out
+              </button>
+            </div>
           </div>
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full rounded-xl bg-primary py-3 font-semibold text-white transition hover:bg-primary-dark disabled:opacity-50"
-          >
-            {loading ? "Looking up..." : "Look Up Account"}
-          </button>
-        </form>
+          {user.brokerage && (
+            <p className="mt-3 text-sm text-muted">{user.brokerage}</p>
+          )}
+        </div>
 
         {error && (
           <p className="mt-4 rounded-lg bg-red-50 px-4 py-2.5 text-sm text-red-600">
@@ -209,7 +267,7 @@ export default function AccountManager() {
 
         {/* Subscription dashboard */}
         {data && (
-          <div className="mt-8 space-y-6">
+          <div className="mt-6 space-y-6">
             {/* Status card */}
             <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
               <div className="flex items-center justify-between">
@@ -319,6 +377,12 @@ export default function AccountManager() {
                 )}
               </div>
             )}
+          </div>
+        )}
+
+        {!data && !error && (
+          <div className="mt-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm text-center">
+            <p className="text-sm text-muted">No subscription found for this account.</p>
           </div>
         )}
       </div>

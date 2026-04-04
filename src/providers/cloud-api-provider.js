@@ -177,8 +177,17 @@ class CloudAPIProvider extends BaseProvider {
       for (const change of entry.changes) {
         if (change.field !== 'messages') continue;
         const value = change.value;
-        if (!value || !value.messages) continue;
+        if (!value) continue;
 
+        // Process delivery status updates
+        if (value.statuses) {
+          for (const status of value.statuses) {
+            this._processStatus(status);
+          }
+        }
+
+        // Process incoming messages
+        if (!value.messages) continue;
         const metadata = value.metadata || {};
         const contacts = value.contacts || [];
 
@@ -186,6 +195,23 @@ class CloudAPIProvider extends BaseProvider {
           this._processMessage(msg, metadata, contacts);
         }
       }
+    }
+  }
+
+  _processStatus(status) {
+    const recipientId = status.recipient_id;
+    const msgStatus = status.status; // sent, delivered, read, failed
+    const timestamp = status.timestamp;
+    const msgId = status.id;
+
+    if (msgStatus === 'failed') {
+      const errorCode = status.errors?.[0]?.code || 'unknown';
+      const errorTitle = status.errors?.[0]?.title || 'Unknown error';
+      logger.error(`Message delivery FAILED to ${recipientId}: ${errorTitle} (code ${errorCode}), msgId=${msgId}`);
+      this.emit('status', { recipientId, status: msgStatus, msgId, errorCode, errorTitle, timestamp });
+    } else {
+      logger.info(`Message status: ${msgStatus} → ${recipientId} (msgId=${msgId})`);
+      this.emit('status', { recipientId, status: msgStatus, msgId, timestamp });
     }
   }
 
@@ -263,6 +289,54 @@ class CloudAPIProvider extends BaseProvider {
 
   // ---------- Sending ----------
 
+  async sendTemplate(chatId, templateName, languageCode, params = {}) {
+    const to = chatId.replace('@c.us', '');
+    const components = [];
+
+    if (params.header) {
+      components.push({
+        type: 'header',
+        parameters: Object.entries(params.header).map(([name, value]) => ({
+          type: 'text',
+          parameter_name: name,
+          text: value,
+        })),
+      });
+    }
+
+    if (params.body) {
+      components.push({
+        type: 'body',
+        parameters: Object.entries(params.body).map(([name, value]) => ({
+          type: 'text',
+          parameter_name: name,
+          text: value,
+        })),
+      });
+    }
+
+    const payload = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'template',
+      template: {
+        name: templateName,
+        language: { code: languageCode },
+      },
+    };
+
+    if (components.length > 0) {
+      payload.template.components = components;
+    }
+
+    const result = await this._graphPost(`/${this.phoneNumberId}/messages`, payload);
+    logger.info(`Template "${templateName}" sent to ${to}`);
+    return result && result.messages && result.messages[0]
+      ? result.messages[0].id
+      : null;
+  }
+
   async sendMessage(chatId, text) {
     const to = chatId.replace('@c.us', '');
     const payload = {
@@ -301,15 +375,30 @@ class CloudAPIProvider extends BaseProvider {
 
   async sendMedia(chatId, filePath, opts = {}) {
     const to = chatId.replace('@c.us', '');
-    logger.info(`sendMedia: uploading ${path.basename(filePath)} for ${to}...`);
-    const mediaId = await this._uploadMedia(filePath);
-    if (!mediaId) throw new Error('Failed to upload media');
+    const filename = path.basename(filePath);
+    logger.info(`sendMedia: uploading ${filename} for ${to}...`);
+
+    // Try uploading with the file's actual MIME type
+    let mediaId = await this._uploadMedia(filePath);
+
+    // If upload fails, retry with a generic document MIME type as fallback
+    if (!mediaId) {
+      logger.warn(`sendMedia: upload failed for ${filename}, retrying as application/pdf fallback...`);
+      mediaId = await this._uploadMedia(filePath, 'application/pdf');
+    }
+
+    if (!mediaId) {
+      const ext = path.extname(filePath).toLowerCase();
+      const err = new Error('UNSUPPORTED_FILE_TYPE');
+      err.fileType = ext;
+      throw err;
+    }
     logger.info(`sendMedia: uploaded, mediaId=${mediaId}`);
 
     const ext = path.extname(filePath).toLowerCase();
     let mediaType = 'document';
     if (['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) mediaType = 'image';
-    else if (['.mp4'].includes(ext)) mediaType = 'video';
+    else if (['.mp4'].includes(ext)) mediaType = this._hasAudioTrack(filePath) ? 'video' : 'document';
     else if (['.ogg', '.mp3'].includes(ext)) mediaType = 'audio';
 
     const payload = {
@@ -323,15 +412,36 @@ class CloudAPIProvider extends BaseProvider {
     if (opts.caption && mediaType !== 'audio') {
       payload[mediaType].caption = opts.caption;
     }
+    // Force document if requested, or add filename for document type
     if (opts.sendMediaAsDocument) {
       payload.type = 'document';
       payload.document = { id: mediaId };
       if (opts.caption) payload.document.caption = opts.caption;
-      payload.document.filename = path.basename(filePath);
+      payload.document.filename = filename;
+    } else if (mediaType === 'document') {
+      payload.document = payload.document || { id: mediaId };
+      payload.document.filename = filename;
     }
 
     const result = await this._graphPost(`/${this.phoneNumberId}/messages`, payload);
-    logger.info(`sendMedia: sent ${path.basename(filePath)} as ${payload.type}, response: ${JSON.stringify(result)}`);
+    logger.info(`sendMedia: sent ${filename} as ${payload.type}, response: ${JSON.stringify(result)}`);
+  }
+
+  /**
+   * Check if a video file has an audio track (required by WhatsApp for video type).
+   */
+  _hasAudioTrack(filePath) {
+    try {
+      const { execFileSync } = require('child_process');
+      const output = execFileSync('ffprobe', [
+        '-v', 'quiet', '-select_streams', 'a', '-show_entries', 'stream=codec_type',
+        '-of', 'csv=p=0', filePath,
+      ], { stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).toString().trim();
+      return output.length > 0;
+    } catch {
+      // ffprobe not available or failed — fall back to document to be safe
+      return false;
+    }
   }
 
   async replyWithMedia(originalMsg, filePath, opts = {}) {
@@ -504,11 +614,11 @@ class CloudAPIProvider extends BaseProvider {
     });
   }
 
-  async _uploadMedia(filePath) {
+  async _uploadMedia(filePath, mimeOverride) {
     return new Promise((resolve, reject) => {
       const filename = path.basename(filePath);
       const fileData = fs.readFileSync(filePath);
-      const mimeType = this._extToMime(path.extname(filePath).toLowerCase());
+      const mimeType = mimeOverride || this._extToMime(path.extname(filePath).toLowerCase());
 
       const boundary = '----FormBoundary' + crypto.randomBytes(16).toString('hex');
 
@@ -520,7 +630,7 @@ class CloudAPIProvider extends BaseProvider {
       // file field
       bodyParts.push(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mimeType}\r\n\r\n`);
 
-      const header = Buffer.from(bodyParts.join('\r\n') + '\r\n');
+      const header = Buffer.from(bodyParts.join('\r\n'));
       const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
       const body = Buffer.concat([header, fileData, footer]);
 
@@ -638,6 +748,7 @@ class CloudAPIProvider extends BaseProvider {
       '.mp3': 'audio/mpeg',
       '.aac': 'audio/aac',
       '.amr': 'audio/amr',
+      '.wav': 'audio/wav',
       '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',

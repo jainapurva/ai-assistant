@@ -271,6 +271,235 @@ async function getCloneUrl(waId, repoFullName) {
 }
 
 /**
+ * Helper for authenticated GitHub API calls.
+ */
+async function githubApiFetch(waId, endpoint, options = {}) {
+  const { token } = await generateInstallationToken(waId);
+  const url = endpoint.startsWith('http') ? endpoint : `https://api.github.com${endpoint}`;
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'application/vnd.github+json',
+      'User-Agent': 'Swayat-AI-Assistant',
+      ...options.headers,
+    },
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(`GitHub API ${res.status}: ${err.message || res.statusText}`);
+  }
+
+  return res.status === 204 ? null : res.json();
+}
+
+// ── GitHub API: Files ─────────────────────────────────────────────────────────
+
+/**
+ * Get a file from a repo (returns decoded content + sha).
+ */
+async function getFile(waId, repo, filePath, ref) {
+  let endpoint = `/repos/${repo}/contents/${filePath}`;
+  if (ref) endpoint += `?ref=${encodeURIComponent(ref)}`;
+  const data = await githubApiFetch(waId, endpoint);
+
+  return {
+    name: data.name,
+    path: data.path,
+    sha: data.sha,
+    size: data.size,
+    content: data.content ? Buffer.from(data.content, 'base64').toString('utf8') : '',
+    encoding: 'utf8',
+    htmlUrl: data.html_url,
+  };
+}
+
+/**
+ * List files/dirs in a repo path.
+ */
+async function listFiles(waId, repo, dirPath, ref) {
+  let endpoint = `/repos/${repo}/contents/${dirPath || ''}`;
+  if (ref) endpoint += `?ref=${encodeURIComponent(ref)}`;
+  const data = await githubApiFetch(waId, endpoint);
+
+  if (!Array.isArray(data)) {
+    return [{ name: data.name, path: data.path, type: data.type, size: data.size }];
+  }
+
+  return data.map(f => ({
+    name: f.name,
+    path: f.path,
+    type: f.type,
+    size: f.size,
+  }));
+}
+
+/**
+ * Create or update a file in a repo.
+ */
+async function createOrUpdateFile(waId, repo, filePath, content, message, branch, sha) {
+  const body = {
+    message,
+    content: Buffer.from(content).toString('base64'),
+  };
+  if (branch) body.branch = branch;
+  if (sha) body.sha = sha;
+
+  const data = await githubApiFetch(waId, `/repos/${repo}/contents/${filePath}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+
+  return {
+    path: data.content.path,
+    sha: data.content.sha,
+    htmlUrl: data.content.html_url,
+    commitSha: data.commit.sha,
+    commitMessage: data.commit.message,
+  };
+}
+
+// ── GitHub API: Branches ──────────────────────────────────────────────────────
+
+/**
+ * List branches in a repo.
+ */
+async function listBranches(waId, repo) {
+  const data = await githubApiFetch(waId, `/repos/${repo}/branches?per_page=100`);
+  return data.map(b => ({
+    name: b.name,
+    sha: b.commit.sha,
+    protected: b.protected,
+  }));
+}
+
+/**
+ * Create a new branch from an existing ref.
+ */
+async function createBranch(waId, repo, branchName, fromBranch) {
+  // Get the SHA of the source branch
+  const ref = await githubApiFetch(waId, `/repos/${repo}/git/ref/heads/${encodeURIComponent(fromBranch)}`);
+  const sha = ref.object.sha;
+
+  const data = await githubApiFetch(waId, `/repos/${repo}/git/refs`, {
+    method: 'POST',
+    body: JSON.stringify({
+      ref: `refs/heads/${branchName}`,
+      sha,
+    }),
+  });
+
+  return {
+    branch: branchName,
+    sha: data.object.sha,
+    fromBranch,
+  };
+}
+
+// ── GitHub API: Pull Requests ─────────────────────────────────────────────────
+
+/**
+ * List pull requests.
+ */
+async function listPullRequests(waId, repo, state) {
+  const data = await githubApiFetch(waId, `/repos/${repo}/pulls?state=${state || 'open'}&per_page=30`);
+  return data.map(pr => ({
+    number: pr.number,
+    title: pr.title,
+    state: pr.state,
+    author: pr.user.login,
+    branch: pr.head.ref,
+    baseBranch: pr.base.ref,
+    createdAt: pr.created_at,
+    htmlUrl: pr.html_url,
+  }));
+}
+
+/**
+ * Create a pull request.
+ */
+async function createPullRequest(waId, repo, title, head, base, body) {
+  const payload = { title, head, base };
+  if (body) payload.body = body;
+
+  const data = await githubApiFetch(waId, `/repos/${repo}/pulls`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+
+  return {
+    number: data.number,
+    title: data.title,
+    htmlUrl: data.html_url,
+    state: data.state,
+  };
+}
+
+// ── GitHub API: Issues ────────────────────────────────────────────────────────
+
+/**
+ * List issues.
+ */
+async function listIssues(waId, repo, state) {
+  const data = await githubApiFetch(waId, `/repos/${repo}/issues?state=${state || 'open'}&per_page=30`);
+  return data
+    .filter(i => !i.pull_request)
+    .map(i => ({
+      number: i.number,
+      title: i.title,
+      state: i.state,
+      author: i.user.login,
+      labels: i.labels.map(l => l.name),
+      createdAt: i.created_at,
+      htmlUrl: i.html_url,
+    }));
+}
+
+/**
+ * Create an issue.
+ */
+async function createIssue(waId, repo, title, body, labels) {
+  const payload = { title };
+  if (body) payload.body = body;
+  if (labels && labels.length) payload.labels = labels;
+
+  const data = await githubApiFetch(waId, `/repos/${repo}/issues`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+
+  return {
+    number: data.number,
+    title: data.title,
+    htmlUrl: data.html_url,
+  };
+}
+
+// ── GitHub API: Search ────────────────────────────────────────────────────────
+
+/**
+ * Search code across accessible repos.
+ */
+async function searchCode(waId, query, repo) {
+  let q = query;
+  if (repo) q += ` repo:${repo}`;
+  const data = await githubApiFetch(waId, `/search/code?q=${encodeURIComponent(q)}&per_page=20`);
+
+  return {
+    totalCount: data.total_count,
+    items: (data.items || []).map(i => ({
+      name: i.name,
+      path: i.path,
+      repo: i.repository.full_name,
+      htmlUrl: i.html_url,
+    })),
+  };
+}
+
+// ── Status ───────────────────────────────────────────────────────────────────
+
+/**
  * Get GitHub connection status for a user.
  */
 function getStatus(waId) {
@@ -296,4 +525,15 @@ module.exports = {
   getCloneUrl,
   encryptState,
   decryptState,
+  // GitHub API
+  getFile,
+  listFiles,
+  createOrUpdateFile,
+  listBranches,
+  createBranch,
+  listPullRequests,
+  createPullRequest,
+  listIssues,
+  createIssue,
+  searchCode,
 };

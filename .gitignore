@@ -11,6 +11,8 @@ google-tokens.json
 microsoft-tokens.json
 gmail-tokens.json
 resend-keys.json
+freetools-accounts.json
+github-app-private-key.pem
 *.pid
 *.log
 .bot-shared-state.json

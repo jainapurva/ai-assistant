@@ -8,8 +8,11 @@ const sandbox = require('./sandbox');
 const googleAuth = require('./google-auth');
 const microsoftAuth = require('./microsoft-auth');
 const resendAuth = require('./resend-auth');
+const githubAuth = require('./github-auth');
+const freetoolsAuth = require('./freetools-auth');
 const activity = require('./activity-logger');
 const agents = require('./agents');
+const conversation = require('./conversation-logger');
 
 // Persistent state file — survives bot restarts
 const STATE_FILE = path.join(config.stateDir, 'bot_state.json');
@@ -184,6 +187,15 @@ function saveState() {
 
 // Load on module init
 loadState();
+
+// Log Claude CLI version on startup for debugging
+try {
+  const { execFileSync } = require('child_process');
+  const ver = execFileSync(config.claudePath, ['--version'], { timeout: 10000, encoding: 'utf8' }).trim();
+  logger.info(`Claude CLI version: ${ver}`);
+} catch (e) {
+  logger.warn(`Could not detect Claude CLI version: ${e.message}`);
+}
 
 function setProjectDir(chatId, dir) {
   if (!fs.existsSync(dir)) {
@@ -405,9 +417,116 @@ NEVER suggest app passwords, SMTP setup, or any manual configuration. The built-
     };
   }
 
-  // Add MCP config (gives Claude native tools)
-  if (mcpConfig) {
-    args.push('--mcp-config', JSON.stringify(mcpConfig));
+  // Trading MCP — always active when using paper-trader agent (no login needed)
+  if (agentId === 'paper-trader') {
+    const tradingMcpPath = sandboxed ? '/opt/mcp/trading-mcp-server.js' : path.resolve(config.tradingMcpPath);
+
+    // Portfolio file lives in the agent workspace
+    const { base } = sandbox.ensureSandboxDirs(sandboxKey || chatId);
+    const agentWorkspace = agents.ensureAgentWorkspace(base, 'paper-trader');
+    const portfolioPath = sandboxed
+      ? '/workspace/portfolio.json'
+      : path.join(agentWorkspace, 'portfolio.json');
+
+    if (!mcpConfig) mcpConfig = { mcpServers: {} };
+    mcpConfig.mcpServers.trading = {
+      command: nodePath,
+      args: [tradingMcpPath],
+      env: { PORTFOLIO_PATH: portfolioPath },
+    };
+  }
+
+  // Job Hunter MCP — always active when using job-hunter agent
+  if (agentId === 'job-hunter') {
+    const jobHunterMcpPath = sandboxed ? '/opt/mcp/job-hunter-mcp-server.js' : path.resolve(config.jobHunterMcpPath);
+
+    // Tracker file lives in the agent workspace
+    const { base } = sandbox.ensureSandboxDirs(sandboxKey || chatId);
+    const agentWorkspace = agents.ensureAgentWorkspace(base, 'job-hunter');
+    const trackerPath = sandboxed
+      ? '/workspace/tracker.json'
+      : path.join(agentWorkspace, 'tracker.json');
+
+    if (!mcpConfig) mcpConfig = { mcpServers: {} };
+    mcpConfig.mcpServers.jobhunter = {
+      command: nodePath,
+      args: [jobHunterMcpPath],
+      env: { TRACKER_PATH: trackerPath, CHAT_ID: chatId, BOT_API_URL: apiUrl },
+    };
+  }
+
+  // Real Estate MCP — always active when using real-estate agent
+  if (agentId === 'real-estate') {
+    const realestateMcpPath = sandboxed ? '/opt/mcp/realestate-mcp-server.js' : path.resolve(config.realestateMcpPath);
+
+    // Data file lives in the agent workspace
+    const { base } = sandbox.ensureSandboxDirs(sandboxKey || chatId);
+    const agentWorkspace = agents.ensureAgentWorkspace(base, 'real-estate');
+    const dataPath = sandboxed
+      ? '/workspace/realestate-data.json'
+      : path.join(agentWorkspace, 'realestate-data.json');
+
+    if (!mcpConfig) mcpConfig = { mcpServers: {} };
+    mcpConfig.mcpServers.realestate = {
+      command: nodePath,
+      args: [realestateMcpPath],
+      env: {
+        DATA_PATH: dataPath,
+        BOT_API_URL: `http://localhost:${config.httpPort}`,
+        CHAT_ID: chatId,
+        FUB_API_KEY: config.fubApiKey || '',
+        MLS_API_URL: config.mlsApiUrl || '',
+        MLS_API_TOKEN: config.mlsApiToken || '',
+        ATTOM_API_KEY: config.attomApiKey || '',
+        WALKSCORE_API_KEY: config.walkscoreApiKey || '',
+        GREATSCHOOLS_API_KEY: config.greatschoolsApiKey || '',
+        FRED_API_KEY: config.fredApiKey || '',
+      },
+    };
+  }
+
+  // Real Estate prompt — tell Claude about real estate tools when active
+  let realestatePrompt = '';
+  if (mcpConfig && mcpConfig.mcpServers && mcpConfig.mcpServers.realestate) {
+    realestatePrompt = `
+REAL ESTATE CRM: You have 57 MCP tools for managing a complete real estate business. ALWAYS use these tools — never fabricate data. All data persists across sessions.
+
+LEAD MANAGEMENT: lead_add, lead_list, lead_view, lead_update, lead_delete, lead_qualify, lead_search, lead_conversation_log, lead_bulk_action, crm_sync, lead_consent_track
+PROPERTIES: property_add, property_list, property_update, property_match, property_compare, mls_search, neighborhood_data
+SHOWINGS: showing_schedule, showing_list, showing_update
+FOLLOW-UPS: followup_add, followup_list, followup_complete
+NURTURE: nurture_create, nurture_list, nurture_enroll, nurture_status, nurture_pause, nurture_process
+LEAD GENERATION: leadgen_buyer_campaign, leadgen_social_content, leadgen_seller_valuation, leadgen_just_sold, leadgen_market_report, leadgen_expired_fsbo, leadgen_referral_create, leadgen_referral_stats, leadgen_stats
+MARKETING: listing_generate, listing_publish, listing_campaign, listing_video_create
+VALUATIONS: valuation_estimate, valuation_to_lead, valuation_list
+CMA: get_comparable_sales, generate_cma, get_mortgage_rates
+TRANSACTIONS: transaction_create, transaction_status, transaction_update, transaction_list, deadline_reminder, document_checklist
+DASHBOARD: pipeline_stats
+
+KEY WORKFLOWS:
+- New lead → lead_add → lead_qualify → ask BANT questions → property_match → schedule showing
+- Marketing → listing_generate → listing_campaign → listing_publish (social/email/whatsapp)
+- Lead gen → leadgen_buyer_campaign or leadgen_seller_valuation → publish → track with leadgen_stats
+- Valuation → valuation_estimate → valuation_to_lead → nurture_enroll
+- Transaction → transaction_create → track deadlines → document_checklist → transaction_update (closed)
+- Start sessions by checking pipeline_stats, followup_list, nurture_status, and deadline_reminder.
+`;
+  }
+
+  // Trading prompt — tell Claude about paper trading tools when active
+  let tradingPrompt = '';
+  if (mcpConfig && mcpConfig.mcpServers && mcpConfig.mcpServers.trading) {
+    tradingPrompt = `
+PAPER TRADING: You have MCP tools for paper trading with real market data. Use trade_buy, trade_sell, portfolio_view, market_quote, market_search, options_chain, trade_history, and portfolio_reset. ALWAYS use these tools — never fabricate prices. The portfolio persists across sessions.
+`;
+  }
+
+  // Job Hunter prompt — tell Claude about job hunting tools when active
+  let jobHunterPrompt = '';
+  if (mcpConfig && mcpConfig.mcpServers && mcpConfig.mcpServers.jobhunter) {
+    jobHunterPrompt = `
+JOB HUNTER: You have MCP tools for job searching and application tracking. Use job_search, job_details, company_info, tracker_add, tracker_list, tracker_update, and tracker_stats. ALWAYS use job_search for finding jobs — never fabricate listings. When the user mentions applying somewhere, use tracker_add. The tracker persists across sessions.
+`;
   }
 
   // Playwright prompt — tell Claude it has browser tools when active
@@ -435,16 +554,82 @@ Do NOT attempt to use Resend tools — they are not available until the user con
 `;
   }
 
-  // GitHub repo context — tell Claude it can commit and push
+  // GitHub MCP — only when user has connected their GitHub account
   let githubPrompt = '';
+  if (githubAuth.isConfigured()) {
+    const ghStatus = githubAuth.getStatus(chatId);
+    if (ghStatus.connected) {
+      const githubMcpPath = sandboxed ? '/opt/mcp/github-mcp-server.js' : path.resolve(config.githubMcpServerPath);
+
+      if (!mcpConfig) mcpConfig = { mcpServers: {} };
+      mcpConfig.mcpServers.github = {
+        command: nodePath,
+        args: [githubMcpPath],
+        env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
+      };
+
+      githubPrompt = `
+GITHUB INTEGRATION: Connected as ${ghStatus.account}. You have MCP tools for GitHub — use them to list repos, read/write files, create branches, open PRs, manage issues, and search code.
+GUIDELINES:
+- Use github_list_repos to see available repos.
+- Use github_get_file / github_list_files to browse repo contents.
+- Use github_create_or_update_file to create or modify files. For updates, you MUST provide the file's current SHA (get it from github_get_file first).
+- Use github_create_branch before making changes if the user wants a separate branch.
+- Use github_create_pr to open pull requests after making changes on a branch.
+- Use github_list_issues / github_create_issue to manage issues.
+- Use github_search_code to find code across repos.
+- The "repo" parameter always uses "owner/repo" format (e.g. "octocat/hello-world").
+COMMANDS: /repos — list connected repos, /repo <name> — clone and set active repo, /github disconnect — remove connection.
+`;
+    } else {
+      githubPrompt = `
+GITHUB INTEGRATION (NOT YET CONNECTED):
+If the user asks about working with GitHub repos, coding on their repos, committing code, or managing repositories — tell them to type /github to connect their GitHub account. They'll choose which repos to give access to.
+CAPABILITIES once connected: Browse repo files, create/update files, create branches, open PRs, manage issues, search code — all via MCP tools.
+COMMANDS: /github — connect GitHub account, /repos — list repos, /repo <name> — set active repo.
+`;
+    }
+  }
+
+  // FreeTools MCP — social media publishing (always active, auto-provisions account)
+  let freetoolsPrompt = '';
+  try {
+    const ftStatus = freetoolsAuth.getStatus(chatId);
+    const freetoolsMcpPath = sandboxed ? '/opt/mcp/freetools-mcp-server.js' : path.resolve(config.freetoolsMcpPath);
+
+    if (!mcpConfig) mcpConfig = { mcpServers: {} };
+    mcpConfig.mcpServers.freetools = {
+      command: nodePath,
+      args: [freetoolsMcpPath],
+      env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
+    };
+
+    freetoolsPrompt = `
+SOCIAL PUBLISHING: You have MCP tools to post and manage content on social media (X/Twitter, LinkedIn, Instagram) via freetools.us.
+WORKFLOW — always follow this order:
+1. ALWAYS call social_list_accounts FIRST — this is the live source of truth. Never assume from memory or conversation history.
+2. If accounts are returned, use their IDs with social_publish_now or social_schedule_post.
+3. Only if social_list_accounts returns empty, use social_get_connect_url and send the OAuth link to the user.
+CRITICAL RULES:
+- NEVER tell the user to connect if you haven't called social_list_accounts first — they may already be connected.
+- NEVER fabricate account IDs — always get them from social_list_accounts.
+- When asked to post to LinkedIn/X/Instagram — call social_list_accounts immediately, then publish.
+- Supported platforms: TWITTER, LINKEDIN, INSTAGRAM.
+MEDIA ATTACHMENTS: To attach images or videos to social posts, use the "filePath" parameter with the local filename (e.g. filePath: "video.mp4"). The bot automatically makes it publicly accessible — do NOT ask the user for a public URL or suggest uploading to Drive. Also set mediaType to "IMAGE" or "VIDEO" accordingly.
+COMMANDS: /social — show connected accounts, /social connect <platform> — connect account, /social posts — list posts.
+`;
+  } catch (e) {
+    logger.warn(`FreeTools MCP setup failed: ${e.message}`);
+  }
+
+  // GitHub repo context — tell Claude it can commit and push when inside a git repo
   const projectDir = getProjectDir(chatId);
   if (projectDir) {
     try {
-      const fs = require('fs');
       const gitDir = require('path').join(projectDir, '.git');
       if (fs.existsSync(gitDir)) {
-        githubPrompt = `
-GITHUB REPO: You are working in a cloned GitHub repository at the current directory. You can edit files, then commit and push.
+        githubPrompt += `
+ACTIVE REPO: You are working in a cloned GitHub repository at the current directory. You can edit files, then commit and push.
 WORKFLOW: Make changes → git add <files> → git commit -m "descriptive message" → git push
 IMPORTANT: Always check git status before starting. Use descriptive commit messages. The push will trigger CI/CD deployment if configured.
 NEVER force push or rewrite history. Only push to the default branch.
@@ -455,8 +640,13 @@ NEVER force push or rewrite history. Only push to the default branch.
 
   // For new sessions, prepend the memory system prompt + integration context
   const fullPrompt = hasSession
-    ? (playwrightPrompt + resendPrompt + googlePrompt + outlookPrompt + githubPrompt + prompt)
-    : MEMORY_SYSTEM_PROMPT + playwrightPrompt + resendPrompt + googlePrompt + outlookPrompt + githubPrompt + prompt;
+    ? (realestatePrompt + tradingPrompt + jobHunterPrompt + playwrightPrompt + resendPrompt + googlePrompt + outlookPrompt + githubPrompt + freetoolsPrompt + prompt)
+    : MEMORY_SYSTEM_PROMPT + realestatePrompt + tradingPrompt + jobHunterPrompt + playwrightPrompt + resendPrompt + googlePrompt + outlookPrompt + githubPrompt + freetoolsPrompt + prompt;
+
+  // Add MCP config — must be after ALL mcpServers are registered (github, freetools, etc.)
+  if (mcpConfig) {
+    args.push('--mcp-config', JSON.stringify(mcpConfig));
+  }
 
   // When --mcp-config is used, Claude CLI silently produces 0 bytes if the prompt
   // is passed as a CLI arg. The workaround: pipe the prompt via shell
@@ -496,6 +686,11 @@ NEVER force push or rewrite history. Only push to the default branch.
   logger.info(`Spawning claude [${runningClaudeCount}/${MAX_CONCURRENT_CLAUDE}] in ${useBwrap ? 'bwrap' : cwd}: ${args.slice(0, -1).join(' ')} "<prompt>"`);
 
   const sbKey = sandboxKey || chatId;
+
+  // Log user message to conversation history (skip on retry to avoid duplicates)
+  if (!_isRetry) {
+    conversation.logEntry(sbKey, agentId, 'user', prompt);
+  }
 
   // Log task start to activity tracker
   activity.logTaskStart(chatId, {
@@ -574,16 +769,44 @@ NEVER force push or rewrite history. Only push to the default branch.
       }
 
       // Retry with fresh session if --resume failed (stale/expired session)
+      // Inject conversation history so context is preserved even without --resume
       if (code !== 0 && hasSession && !_isRetry) {
         logger.warn(`Resume failed for ${chatId} (code ${code}): ${errorDetail.slice(0, 200)}`);
         clearSession(chatId);
+
+        // Load conversation history and prepend to prompt for context continuity
+        const history = conversation.loadHistory(sbKey, agentId);
+        let retryPrompt = prompt;
+        if (history.length > 0) {
+          const historyContext = conversation.formatHistoryAsContext(history);
+          retryPrompt = historyContext + prompt;
+          logger.info(`Injecting ${history.length} conversation history entries for ${chatId} retry`);
+        }
+
         // Delay retry slightly to avoid racing with stale CLI state
-        setTimeout(() => resolve(runClaude(prompt, chatId, sandboxKey, true)), 1000);
+        setTimeout(() => resolve(runClaude(retryPrompt, chatId, sandboxKey, true)), 1000);
         return;
       }
 
       if (code !== 0) {
-        logger.error(`claude exited with code ${code}: ${errorDetail}`);
+        // Classify the error for easier debugging
+        const errLower = errorDetail.toLowerCase();
+        const isAuthError = /auth|token|oauth|401|403|credential|expired|refresh|unauthorized|login/i.test(errorDetail);
+        const isUpdateError = /update|upgrade|version|outdated|deprecated/i.test(errorDetail);
+        const isRateLimit = /rate.?limit|429|too many|throttl/i.test(errorDetail);
+        const isOOM = /memory|oom|killed|signal 9/i.test(errorDetail) || code === 137;
+
+        let errorType = 'unknown';
+        if (isAuthError) errorType = 'AUTH';
+        else if (isUpdateError) errorType = 'UPDATE';
+        else if (isRateLimit) errorType = 'RATE_LIMIT';
+        else if (isOOM) errorType = 'OOM';
+
+        logger.error(`claude [${errorType}] exited with code ${code} for ${chatId}: ${errorDetail}`);
+        if (stderr.trim() && stderr !== errorDetail) {
+          logger.error(`claude full stderr: ${stderr.slice(0, 1000)}`);
+        }
+
         addTaskHistory(chatId, { prompt: promptPreview, startTime, endTime, durationSecs, tokens: null, status: 'error' });
         return reject(new Error(`Claude exited with code ${code}: ${errorDetail.slice(0, 200)}`));
       }
@@ -654,6 +877,9 @@ NEVER force push or rewrite history. Only push to the default branch.
       }
 
       addTaskHistory(chatId, { prompt: promptPreview, startTime, endTime, durationSecs, tokens, status: 'completed' });
+
+      // Log assistant response to conversation history
+      conversation.logEntry(sbKey, agentId, 'assistant', result);
 
       // Layer 3: filter sensitive content from output before sending to WhatsApp
       const filtered = filterSensitiveOutput(result);
@@ -823,6 +1049,10 @@ function getUserAgent(chatId) {
   return activeAgents.get(chatId) || agents.getDefaultAgentId();
 }
 
+function getAllChatIds() {
+  return Array.from(activeAgents.keys());
+}
+
 function setUserAgent(chatId, agentId) {
   activeAgents.set(chatId, agentId);
   saveState();
@@ -904,7 +1134,8 @@ module.exports = {
   isSubscribed, addSubscription, removeSubscription, getSubscribedUsers,
   isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup,
   getSandboxKey,
-  getUserAgent, setUserAgent,
+  getUserAgent, setUserAgent, getAllChatIds,
   setPendingTask, clearPendingTask, getPendingTasks,
   setPersistedQueue, getPersistedQueue, clearPersistedQueue,
+  clearConversationHistory: conversation.clearHistory,
 };

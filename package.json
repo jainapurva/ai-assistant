@@ -7,10 +7,15 @@
     "start": "node src/index.js",
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
-    "build:mcp": "npm run build:mcp:google && npm run build:mcp:outlook && npm run build:mcp:resend",
+    "build:mcp": "npm run build:mcp:google && npm run build:mcp:outlook && npm run build:mcp:resend && npm run build:mcp:trading && npm run build:mcp:github && npm run build:mcp:job-hunter && npm run build:mcp:freetools && npm run build:mcp:realestate",
     "build:mcp:google": "esbuild src/mcp/google-mcp-server.js --bundle --platform=node --target=node20 --format=cjs --outfile=dist/google-mcp-server.bundle.js",
     "build:mcp:outlook": "esbuild src/mcp/outlook-mcp-server.js --bundle --platform=node --target=node20 --format=cjs --outfile=dist/outlook-mcp-server.bundle.js",
-    "build:mcp:resend": "esbuild node_modules/resend-mcp/dist/index.js --bundle --platform=node --target=node20 --format=esm --outfile=dist/resend-mcp-server.bundle.mjs --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\""
+    "build:mcp:resend": "esbuild node_modules/resend-mcp/dist/index.js --bundle --platform=node --target=node20 --format=esm --outfile=dist/resend-mcp-server.bundle.mjs --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\"",
+    "build:mcp:trading": "esbuild src/mcp/trading-mcp-server.js --bundle --platform=node --target=node20 --format=cjs --outfile=dist/trading-mcp-server.bundle.js",
+    "build:mcp:github": "esbuild src/mcp/github-mcp-server.js --bundle --platform=node --target=node20 --format=cjs --outfile=dist/github-mcp-server.bundle.js",
+    "build:mcp:job-hunter": "esbuild src/mcp/job-hunter-mcp-server.js --bundle --platform=node --target=node20 --format=cjs --outfile=dist/job-hunter-mcp-server.bundle.js",
+    "build:mcp:freetools": "esbuild src/mcp/freetools-mcp-server.js --bundle --platform=node --target=node20 --format=cjs --outfile=dist/freetools-mcp-server.bundle.js",
+    "build:mcp:realestate": "esbuild src/mcp/realestate-mcp-server.js --bundle --platform=node --target=node20 --format=cjs --outfile=dist/realestate-mcp-server.bundle.js"
   },
   "dependencies": {
     "@azure/msal-node": "^5.0.6",

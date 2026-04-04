@@ -1,18 +1,21 @@
 const steps = [
   {
     step: "1",
-    title: "Enter your phone number",
-    description: "Sign up with your WhatsApp number — it only takes a few seconds.",
+    title: "Join the waitlist",
+    description:
+      "Tell us about your business. We onboard in small batches to give every customer a white-glove setup.",
   },
   {
     step: "2",
-    title: "Open WhatsApp",
-    description: "Tap the link we give you. It opens a chat with your new AI assistant — no installs needed.",
+    title: "Tell it what you need",
+    description:
+      "Manage leads, send invoices, book appointments, run campaigns \u2014 just type what you want in plain English.",
   },
   {
     step: "3",
-    title: "Start chatting",
-    description: "Ask anything. Get help with work, creative projects, research, or just your daily chaos.",
+    title: "Watch your profit grow",
+    description:
+      "Your AI agents work 24/7 \u2014 responding to leads in seconds, following up automatically, and never dropping the ball.",
   },
 ];
 
@@ -21,21 +24,40 @@ export default function HowItWorks() {
     <section id="how-it-works" className="bg-surface-light px-6 py-24">
       <div className="mx-auto max-w-4xl">
         <h2 className="text-center text-3xl font-bold text-heading sm:text-4xl">
-          Up and running in{" "}
-          <span className="text-primary">30 seconds</span>
+          From waitlist to <span className="text-primary">more profit</span> in
+          3 steps
         </h2>
-        <div className="mt-16 grid gap-10 sm:grid-cols-3">
+
+        <div className="relative mt-16 grid gap-10 sm:grid-cols-3">
+          {/* Connector line (visible on sm+) */}
+          <div className="pointer-events-none absolute top-7 left-[16.67%] right-[16.67%] hidden h-0.5 bg-gradient-to-r from-primary/30 via-primary/50 to-primary/30 sm:block" />
+
           {steps.map((s) => (
-            <div key={s.step} className="text-center">
-              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 text-2xl font-bold text-primary">
+            <div key={s.step} className="relative text-center">
+              <div className="relative z-10 mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 text-2xl font-bold text-primary ring-4 ring-surface-light">
                 {s.step}
               </div>
-              <h3 className="mt-5 text-lg font-semibold text-heading">{s.title}</h3>
+              <h3 className="mt-5 text-lg font-semibold text-heading">
+                {s.title}
+              </h3>
               <p className="mt-2 text-sm leading-relaxed text-body">
                 {s.description}
               </p>
             </div>
           ))}
+        </div>
+
+        {/* CTA */}
+        <div className="mt-14 text-center">
+          <a
+            href="#waitlist"
+            className="inline-block rounded-full bg-primary px-8 py-3.5 text-lg font-semibold text-white transition hover:bg-primary-dark"
+          >
+            Join Waitlist
+          </a>
+          <p className="mt-3 text-sm text-muted">
+            Limited spots per batch. No credit card required.
+          </p>
         </div>
       </div>
     </section>

@@ -3,18 +3,20 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const { createProvider } = require('./providers');
-const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearSession, setProjectDir, getProjectDir, clearProjectDir, setChatModel, getChatModel, clearChatModel, getTokenUsage, resetTokenUsage, isGreeted, markGreeted, isSubscribed, addSubscription, removeSubscription, getSubscribedUsers, isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup, getSandboxKey, getUserAgent, setUserAgent, setPendingTask, clearPendingTask, getPendingTasks, setPersistedQueue, getPersistedQueue, clearPersistedQueue } = require('./claude');
+const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearSession, setProjectDir, getProjectDir, clearProjectDir, setChatModel, getChatModel, clearChatModel, getTokenUsage, resetTokenUsage, isGreeted, markGreeted, isSubscribed, addSubscription, removeSubscription, getSubscribedUsers, isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup, getSandboxKey, getUserAgent, setUserAgent, setPendingTask, clearPendingTask, getPendingTasks, setPersistedQueue, getPersistedQueue, clearPersistedQueue, clearConversationHistory } = require('./claude');
 const { ensureProfile, getProfile, registerUser, getAllProfiles, formatProfileCard } = require('./profiles');
 const apiCommands = require('./api-commands');
 const drive = require('./drive');
 const googleAuth = require('./google-auth');
 const microsoftAuth = require('./microsoft-auth');
 const resendAuth = require('./resend-auth');
+const freetoolsAuth = require('./freetools-auth');
 const { stripAnsi, chunkMessage, markdownToWhatsApp } = require('./formatter');
 const { detectOptions } = require('./options');
 const { discoverProjects, getProjectSummary } = require('./projects');
 const sandbox = require('./sandbox');
 const scheduler = require('./scheduler');
+const nurtureRunner = require('./nurture-runner');
 const logger = require('./logger');
 const chatLogger = require('./chat-logger');
 const activity = require('./activity-logger');
@@ -51,7 +53,7 @@ async function isRegistered(waId) {
     const registered = data.registered === true && data.status === 'active';
     // Only cache positive results — never cache "not registered" so signup takes effect immediately
     if (registered) {
-      registrationCache.set(waId, { registered, checkedAt: Date.now() });
+      registrationCache.set(waId, { registered, checkedAt: Date.now(), welcomeSent: data.welcomeSent, defaultAgent: data.defaultAgent, fullName: data.fullName });
     }
     return registered;
   } catch (err) {
@@ -59,6 +61,10 @@ async function isRegistered(waId) {
     // On error, allow through (don't block users due to API issues)
     return true;
   }
+}
+
+function getRegistrationData(waId) {
+  return registrationCache.get(waId.replace('@c.us', '')) || null;
 }
 
 // Validate config: in non-open-access mode, whitelisted number is required
@@ -89,7 +95,7 @@ const quickReplies = new Map();
 
 // Pending project selection poll: chatId -> { dirs: string[] }
 const pendingProjectPolls = new Map();
-const pendingFilePolls = new Map(); // chatId -> { files: [{ name, fullPath }] }
+const pendingFilePolls = new Map(); // filePollKey -> { files: [{ name, fullPath }] }
 
 // Media batching: accumulate rapid-fire media messages before processing
 const mediaBatch = new Map(); // chatId -> { msgs: [], timer, firstMsg, caption, senderId, senderName }
@@ -223,44 +229,6 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
     } catch (e) {}
   }, WORKING_DELAY_MS);
 
-  // Periodic progress pings — every 60s with random funny messages
-  const PROGRESS_INTERVAL_MS = 60000;
-  let progressCount = 0;
-  const PROGRESS_MSGS = [
-    'Still cooking... the recipe said 30 seconds but I think the oven lied 🍳',
-    'Bribing the servers with compliments... "you\'re doing great sweetie" 💅',
-    'My hamster is running as fast as he can on the wheel 🐹',
-    'Currently arguing with the code... I\'m winning 🥊',
-    'Making coffee while I wait for my brain to load ☕',
-    'Plot twist: the task was the friends we made along the way 🎬',
-    'Teaching a robot to think is harder than it looks 🤖',
-    'Still here! Just had to refuel the AI juice 🧃',
-    'If I had a dollar for every millisecond this is taking... 💰',
-    'Running calculations... carry the 1... carry the 2... carry the fridge 🧮',
-    'Asking the universe for answers... universe said "new phone who dis" 🌌',
-    'Currently in a meeting with my neurons. They can\'t agree 🧠',
-    'Almost there! Said every GPS ever... 🗺️',
-    'Downloading more RAM... just kidding, I wish 💾',
-    'I\'m not slow, I\'m just building suspense 🎭',
-    'Training my pet algorithm. It\'s not house-trained yet 🐕',
-    'Thinking so hard my circuits are getting a six-pack 💪',
-    'Hold on, let me put on my thinking cap... ok it\'s on backwards 🧢',
-    'Currently speedrunning this task... badly 🏃',
-    'My code is compiling and my patience is decompiling ⏳',
-  ];
-  const usedMsgs = new Set();
-  const progressTimer = setInterval(async () => {
-    try {
-      // Pick a random unused message
-      let available = PROGRESS_MSGS.filter((_, i) => !usedMsgs.has(i));
-      if (available.length === 0) { usedMsgs.clear(); available = PROGRESS_MSGS; }
-      const idx = PROGRESS_MSGS.indexOf(available[Math.floor(Math.random() * available.length)]);
-      usedMsgs.add(idx);
-      const elapsed = Math.round((progressCount + 1) * PROGRESS_INTERVAL_MS / 60000);
-      await botReply(msg, `${PROGRESS_MSGS[idx]} (${elapsed} min)`);
-      progressCount++;
-    } catch {}
-  }, PROGRESS_INTERVAL_MS);
 
   try {
     const sbKey = getSandboxKey(chatId, senderId || config.whitelistedNumber);
@@ -269,74 +237,104 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
     // Only enabled when sandbox is active — never scan host filesystem
     const useSandbox = config.sandboxEnabled && sandbox.isBwrapAvailable();
     let workspaceDir = null;
-    let filesBefore = new Map(); // filename -> mtime
+    let filesBefore = new Map(); // relative path -> mtime
     if (useSandbox) {
       workspaceDir = path.join(sandbox.getSandboxDir(sbKey), 'workspace');
       try {
-        for (const f of fs.readdirSync(workspaceDir)) {
-          try {
-            const stat = fs.statSync(path.join(workspaceDir, f));
-            if (stat.isFile()) filesBefore.set(f, stat.mtimeMs);
-          } catch {}
-        }
+        const scanDir = (dir, prefix = '') => {
+          for (const f of fs.readdirSync(dir)) {
+            const fullPath = path.join(dir, f);
+            try {
+              const stat = fs.statSync(fullPath);
+              const relPath = prefix ? `${prefix}/${f}` : f;
+              if (stat.isFile()) filesBefore.set(relPath, stat.mtimeMs);
+              else if (stat.isDirectory() && !f.startsWith('.')) scanDir(fullPath, relPath);
+            } catch {}
+          }
+        };
+        scanDir(workspaceDir);
       } catch {}
     }
 
     const rawResponse = await runClaude(prompt, chatId, sbKey, false, { useBrowser: !!opts.useBrowser });
     clearTimeout(workingTimer);
-    clearInterval(progressTimer);
     const cleaned = stripAnsi(rawResponse).trim();
 
     // Detect new files Claude created and send them to the user (sandbox-only)
     // < 10MB → send via WhatsApp directly
     // >= 10MB → upload to Google Drive (if connected), else warn
-    const SENDABLE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.pdf', '.mp4', '.mp3', '.ogg', '.csv', '.xlsx', '.docx', '.pptx', '.zip', '.txt', '.html', '.json', '.svg']);
+    const SENDABLE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.pdf', '.mp4', '.mp3', '.ogg', '.wav', '.aac', '.csv', '.xlsx', '.docx', '.pptx', '.zip', '.txt', '.html', '.json', '.svg']);
     const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
+    const VIDEO_EXTS = new Set(['.mp4']);
+    const AUDIO_EXTS = new Set(['.ogg', '.mp3']);
+    const NATIVE_MEDIA_EXTS = new Set([...IMAGE_EXTS, ...VIDEO_EXTS, ...AUDIO_EXTS]);
     const DRIVE_THRESHOLD_BYTES = 10 * 1024 * 1024; // 10MB — above this, upload to Drive
 
     if (useSandbox && workspaceDir) try {
-      const filesAfter = fs.readdirSync(workspaceDir);
+      // Recursively collect all files after Claude ran
+      const filesAfterList = [];
+      const scanAfter = (dir, prefix = '') => {
+        for (const f of fs.readdirSync(dir)) {
+          const fullPath = path.join(dir, f);
+          try {
+            const stat = fs.statSync(fullPath);
+            const relPath = prefix ? `${prefix}/${f}` : f;
+            if (stat.isFile()) filesAfterList.push({ relPath, fullPath, stat });
+            else if (stat.isDirectory() && !f.startsWith('.')) scanAfter(fullPath, relPath);
+          } catch {}
+        }
+      };
+      scanAfter(workspaceDir);
+
       const fileSenderId = senderId || config.whitelistedNumber;
       const driveConnected = drive.isConfigured() && googleAuth.isConfigured() && googleAuth.getStatus(fileSenderId).connected;
 
-      for (const f of filesAfter) {
-        const fullPath = path.join(workspaceDir, f);
+      for (const { relPath, fullPath, stat } of filesAfterList) {
         try {
-          const stat = fs.statSync(fullPath);
-          if (!stat.isFile()) continue;
-          // Only new files (not existing before Claude ran)
-          if (filesBefore.has(f)) continue;
+          const basename = path.basename(relPath);
+          // Only new or modified files (not unchanged from before Claude ran)
+          const prevMtime = filesBefore.get(relPath);
+          if (prevMtime !== undefined && stat.mtimeMs <= prevMtime) continue;
           // Skip uploaded media files (user's own input, not Claude's output)
-          if (f.startsWith('wa_')) continue;
-          const ext = path.extname(f).toLowerCase();
+          if (basename.startsWith('wa_')) continue;
+          const ext = path.extname(basename).toLowerCase();
           if (!SENDABLE_EXTS.has(ext)) continue;
           if (stat.size === 0) continue;
 
           if (stat.size >= DRIVE_THRESHOLD_BYTES) {
             // Large file → upload to Google Drive
             if (driveConnected) {
-              logger.info(`Output file ${f} is ${(stat.size / 1048576).toFixed(1)}MB — uploading to Drive`);
+              logger.info(`Output file ${relPath} is ${(stat.size / 1048576).toFixed(1)}MB — uploading to Drive`);
               try {
                 const link = await drive.uploadFile(fileSenderId, chatId, chatId, fullPath);
-                activity.logMediaOut(chatId, { agentId, filename: f, sizeBytes: stat.size, type: 'file', destination: 'drive' });
-                await botReply(msg, `📤 *${f}* (${(stat.size / 1048576).toFixed(1)}MB) uploaded to Drive:\n${link}`);
+                activity.logMediaOut(chatId, { agentId, filename: relPath, sizeBytes: stat.size, type: 'file', destination: 'drive' });
+                await botReply(msg, `📤 *${relPath}* (${(stat.size / 1048576).toFixed(1)}MB) uploaded to Drive:\n${link}`);
               } catch (e) {
-                await botReply(msg, `⚠️ File *${f}* is ${(stat.size / 1048576).toFixed(1)}MB — Drive upload failed: ${e.message}`);
+                await botReply(msg, `⚠️ File *${relPath}* is ${(stat.size / 1048576).toFixed(1)}MB — Drive upload failed: ${e.message}`);
               }
             } else {
-              await botReply(msg, `⚠️ *${f}* is ${(stat.size / 1048576).toFixed(1)}MB — too large for WhatsApp. Use \`/gmail login\` to enable Drive uploads.`);
+              await botReply(msg, `⚠️ *${relPath}* is ${(stat.size / 1048576).toFixed(1)}MB — too large for WhatsApp. Use \`/gmail login\` to enable Drive uploads.`);
             }
           } else {
             // Small file → send directly via WhatsApp
-            logger.info(`Sending output file to user: ${f} (${(stat.size / 1024).toFixed(1)}KB)`);
-            activity.logMediaOut(chatId, { agentId, filename: f, sizeBytes: stat.size, type: IMAGE_EXTS.has(ext) ? 'image' : 'file', destination: 'whatsapp' });
+            // Send images/videos/audio as native types (inline playback), others as documents
+            const isNativeMedia = NATIVE_MEDIA_EXTS.has(ext);
+            const mediaLabel = IMAGE_EXTS.has(ext) ? 'image' : VIDEO_EXTS.has(ext) ? 'video' : AUDIO_EXTS.has(ext) ? 'audio' : 'file';
+            logger.info(`Sending output file to user: ${relPath} (${(stat.size / 1024).toFixed(1)}KB) as ${isNativeMedia ? mediaLabel : 'document'}`);
+            activity.logMediaOut(chatId, { agentId, filename: relPath, sizeBytes: stat.size, type: mediaLabel, destination: 'whatsapp' });
             await provider.sendMedia(chatId, fullPath, {
-              sendMediaAsDocument: true,
-              caption: f,
+              sendMediaAsDocument: !isNativeMedia,
+              caption: basename,
             });
           }
         } catch (e) {
-          logger.warn(`Failed to send output file ${f}: ${e.message}`);
+          if (e.message === 'UNSUPPORTED_FILE_TYPE') {
+            logger.warn(`Unsupported file type for WhatsApp: ${relPath} (${e.fileType})`);
+            await botReply(msg, `📎 I created *${basename}*, but WhatsApp doesn't support sending *${e.fileType}* files.\n\nSupported formats: images (jpg, png, webp), video (mp4), audio (mp3, ogg, aac), documents (pdf, docx, xlsx, pptx, txt, csv, zip).\n\nYou can access it via /files.`);
+          } else {
+            logger.warn(`Failed to send output file ${relPath}: ${e.message}`);
+            await botReply(msg, `📎 I created *${basename}*, but couldn't deliver it via WhatsApp. You can download it using /files.`);
+          }
         }
       }
     } catch (e) {
@@ -356,7 +354,6 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
     logger.info(`Response sent (${cleaned.length} chars)`);
   } catch (err) {
     clearTimeout(workingTimer);
-    clearInterval(progressTimer);
     if (err.message === 'STOPPED_BY_USER') {
       logger.info(`Task stopped by user for chat ${chatId}`);
       chatLogger.logError(logSenderId, chatId, 'Stopped by user');
@@ -487,6 +484,95 @@ function isBotGeneratedMessage(text) {
   return BOT_MESSAGE_PREFIXES.some(prefix => text.startsWith(prefix));
 }
 
+// --- Temporary media file serving (for social publishing) ---
+// Serves workspace files at a public URL so freetools.us can fetch them for social posts.
+// Files are served with a signed token that expires after 10 minutes.
+const tempMediaTokens = new Map(); // token -> { filePath, expiresAt }
+
+// Cleanup expired tokens every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, entry] of tempMediaTokens) {
+    if (now > entry.expiresAt) tempMediaTokens.delete(token);
+  }
+}, 5 * 60 * 1000).unref();
+
+/**
+ * Serve a workspace file at a temporary public URL for social publishing.
+ * Returns the public URL, or null if WEBHOOK_BASE_URL is not configured.
+ */
+function serveWorkspaceFile(chatId, filePath) {
+  if (!config.webhookBaseUrl) return null;
+
+  // Resolve the file in the user's workspace
+  const sbKey = getSandboxKey(chatId, chatId);
+  const workspaceDir = path.join(sandbox.getSandboxDir(sbKey), 'workspace');
+  const fullPath = path.resolve(workspaceDir, filePath);
+
+  // Security: ensure path stays within workspace
+  if (!fullPath.startsWith(workspaceDir + path.sep) && fullPath !== workspaceDir) return null;
+  if (!fs.existsSync(fullPath)) return null;
+
+  const token = require('crypto').randomBytes(24).toString('hex');
+  tempMediaTokens.set(token, { filePath: fullPath, expiresAt: Date.now() + 10 * 60 * 1000 }); // 10 min TTL
+  return `${config.webhookBaseUrl}/media/temp/${token}/${encodeURIComponent(path.basename(fullPath))}`;
+}
+
+provider.addRoute('GET', '/media/temp/', (req, res) => {
+  const url = new URL(req.url, `http://localhost:${config.webhookPort}`);
+  const token = url.pathname.split('/media/temp/')[1]?.split('/')[0];
+  const entry = token && tempMediaTokens.get(token);
+
+  if (!entry || Date.now() > entry.expiresAt) {
+    res.writeHead(404);
+    return res.end('Not found or expired');
+  }
+
+  try {
+    const stat = fs.statSync(entry.filePath);
+    const ext = path.extname(entry.filePath).toLowerCase();
+    const mimeMap = { '.mp4': 'video/mp4', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg' };
+    const contentType = mimeMap[ext] || 'application/octet-stream';
+
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': stat.size,
+      'Content-Disposition': `inline; filename="${path.basename(entry.filePath)}"`,
+    });
+    fs.createReadStream(entry.filePath).pipe(res);
+  } catch (e) {
+    res.writeHead(404);
+    res.end('File not found');
+  }
+});
+
+// --- /send-template route (sends a WhatsApp template message) ---
+// Must be registered before /send since route matching uses startsWith
+provider.addRoute('POST', '/send-template', (req, res) => {
+  let body = '';
+  req.on('data', chunk => body += chunk);
+  req.on('end', async () => {
+    try {
+      const { chatId, template, language, params } = JSON.parse(body);
+      if (!chatId || !template) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'chatId and template required' }));
+      }
+      const msgId = await provider.sendTemplate(
+        chatId.includes('@') ? chatId : chatId + '@c.us',
+        template,
+        language || 'en',
+        params || {}
+      );
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'sent', messageId: msgId }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  });
+});
+
 // --- /send route on public webhook server (called by swayat.com signup) ---
 provider.addRoute('POST', '/send', (req, res) => {
   let body = '';
@@ -538,6 +624,289 @@ provider.addRoute('POST', '/setup-agent', (req, res) => {
       res.end(JSON.stringify({ error: e.message }));
     }
   });
+});
+
+// --- Dashboard Auth (OTP via WhatsApp) ---
+
+const crypto = require('crypto');
+const otpStore = new Map(); // phone -> { code, expiresAt }
+const AUTH_SECRET = process.env.DASHBOARD_AUTH_SECRET || crypto.randomBytes(32).toString('hex');
+
+function generateToken(phone) {
+  const payload = JSON.stringify({ phone, iat: Date.now() });
+  const hmac = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('hex');
+  return Buffer.from(payload).toString('base64') + '.' + hmac;
+}
+
+function verifyToken(token) {
+  try {
+    const [payloadB64, sig] = token.split('.');
+    if (!payloadB64 || !sig) return null;
+    const payload = Buffer.from(payloadB64, 'base64').toString('utf8');
+    const expected = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('hex');
+    if (sig !== expected) return null;
+    const data = JSON.parse(payload);
+    // Tokens expire after 30 days
+    if (Date.now() - data.iat > 30 * 24 * 60 * 60 * 1000) return null;
+    return data.phone;
+  } catch {
+    return null;
+  }
+}
+
+function setCorsHeaders(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+}
+
+// OPTIONS handler for CORS preflight
+provider.addRoute('OPTIONS', '/auth/', (req, res) => {
+  setCorsHeaders(res);
+  res.writeHead(204);
+  res.end();
+});
+
+provider.addRoute('OPTIONS', '/realestate/', (req, res) => {
+  setCorsHeaders(res);
+  res.writeHead(204);
+  res.end();
+});
+
+provider.addRoute('POST', '/auth/send-otp', (req, res) => {
+  setCorsHeaders(res);
+  let body = '';
+  req.on('data', chunk => body += chunk);
+  req.on('end', async () => {
+    try {
+      const { phone } = JSON.parse(body);
+      if (!phone) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'phone is required' }));
+      }
+
+      // Generate 6-digit OTP
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      otpStore.set(phone, { code, expiresAt: Date.now() + 5 * 60 * 1000 }); // 5 min expiry
+
+      // Send OTP via WhatsApp
+      const chatId = phone.replace('+', '') + '@c.us';
+      try {
+        await provider.sendMessage(chatId, `Your Swayat dashboard login code: *${code}*\n\nThis code expires in 5 minutes. Do not share it with anyone.`);
+      } catch (sendErr) {
+        logger.error('[auth] Failed to send OTP via WhatsApp:', sendErr.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Failed to send OTP. Make sure this phone number is registered with Swayat.' }));
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, message: 'OTP sent to your WhatsApp' }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  });
+});
+
+provider.addRoute('POST', '/auth/verify-otp', (req, res) => {
+  setCorsHeaders(res);
+  let body = '';
+  req.on('data', chunk => body += chunk);
+  req.on('end', () => {
+    try {
+      const { phone, code } = JSON.parse(body);
+      if (!phone || !code) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'phone and code are required' }));
+      }
+
+      const stored = otpStore.get(phone);
+      if (!stored) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'No OTP found. Request a new one.' }));
+      }
+
+      if (Date.now() > stored.expiresAt) {
+        otpStore.delete(phone);
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'OTP expired. Request a new one.' }));
+      }
+
+      if (stored.code !== code) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'Invalid OTP. Please try again.' }));
+      }
+
+      // OTP valid — generate token
+      otpStore.delete(phone);
+      const token = generateToken(phone);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, token, phone }));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  });
+});
+
+// Verify token endpoint (for session validation)
+provider.addRoute('POST', '/auth/verify-token', (req, res) => {
+  setCorsHeaders(res);
+  let body = '';
+  req.on('data', chunk => body += chunk);
+  req.on('end', () => {
+    try {
+      const { token } = JSON.parse(body);
+      const phone = verifyToken(token);
+      if (!phone) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ valid: false }));
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ valid: true, phone }));
+    } catch (e) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ valid: false }));
+    }
+  });
+});
+
+// --- Real Estate Dashboard API (registered on public webhook server) ---
+
+provider.addRoute('GET', '/realestate/dashboard', (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+
+  // CORS headers for website
+  setCorsHeaders(res);
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    return res.end();
+  }
+
+  // Authenticate via token
+  const authHeader = req.headers['authorization'];
+  const tokenFromHeader = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  const tokenFromQuery = url.searchParams.get('token');
+  const token = tokenFromHeader || tokenFromQuery;
+
+  const phone = token ? verifyToken(token) : null;
+  if (!phone) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'Unauthorized. Please sign in.' }));
+  }
+
+  try {
+    // Find the user's chatId from phone number
+    const chatId = phone.replace('+', '') + '@c.us';
+    const { base } = sandbox.ensureSandboxDirs(chatId);
+    const dataPath = require('path').join(base, 'workspace', 'agents', 'real-estate', 'realestate-data.json');
+
+    if (!require('fs').existsSync(dataPath)) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ found: false, message: 'No real estate data found for this user.' }));
+    }
+
+    const data = JSON.parse(require('fs').readFileSync(dataPath, 'utf8'));
+
+    // Build dashboard summary
+    const todayStr = new Date().toISOString().split('T')[0];
+    const leads = data.leads || [];
+    const properties = data.properties || [];
+    const showings = data.showings || [];
+    const followups = data.followups || [];
+    const campaigns = data.campaigns || [];
+    const transactions = data.transactions || [];
+    const nurtureEnrollments = data.nurtureEnrollments || [];
+    const valuations = data.valuations || [];
+    const referrals = data.referrals || [];
+
+    // Lead pipeline
+    const hotLeads = leads.filter(l => l.category === 'hot').length;
+    const warmLeads = leads.filter(l => l.category === 'warm').length;
+    const coldLeads = leads.filter(l => l.category === 'cold').length;
+    const closedWon = leads.filter(l => l.status === 'closed-won').length;
+    const closedLost = leads.filter(l => l.status === 'closed-lost').length;
+
+    // Today's items
+    const todaysShowings = showings.filter(s => s.date === todayStr && s.status === 'scheduled');
+    const overdueFollowups = followups.filter(f => f.date < todayStr && f.status === 'pending');
+    const todaysFollowups = followups.filter(f => f.date === todayStr && f.status === 'pending');
+    const activeNurture = nurtureEnrollments.filter(e => e.status === 'active').length;
+
+    // Transaction deadlines
+    const upcomingDeadlines = [];
+    for (const txn of transactions.filter(t => t.status !== 'closed' && t.status !== 'cancelled')) {
+      for (const dl of (txn.deadlines || [])) {
+        if (dl.status === 'pending' && dl.date >= todayStr) {
+          upcomingDeadlines.push({ transaction: txn.leadName, deadline: dl.name, date: dl.date });
+        }
+      }
+    }
+
+    // Recent activity (last 10 leads by creation date)
+    const recentLeads = [...leads].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')).slice(0, 10);
+
+    const dashboard = {
+      found: true,
+      summary: {
+        totalLeads: leads.length, hotLeads, warmLeads, coldLeads, closedWon, closedLost,
+        totalProperties: properties.length,
+        availableProperties: properties.filter(p => p.status === 'available').length,
+        soldProperties: properties.filter(p => p.status === 'sold' || p.status === 'rented').length,
+        totalShowings: showings.length,
+        todaysShowings: todaysShowings.length,
+        overdueFollowups: overdueFollowups.length,
+        todaysFollowups: todaysFollowups.length,
+        activeCampaigns: campaigns.filter(c => c.status === 'active').length,
+        activeTransactions: transactions.filter(t => t.status !== 'closed' && t.status !== 'cancelled').length,
+        activeNurture,
+        totalValuations: valuations.length,
+        totalReferrals: referrals.reduce((s, r) => s + (r.referredLeads || []).length, 0),
+        conversionRate: leads.length > 0 ? `${((closedWon / leads.length) * 100).toFixed(1)}%` : '0%',
+      },
+      todaysShowings: todaysShowings.map(s => ({ id: s.id, lead: s.leadName, property: s.propertyTitle, time: s.time })),
+      overdueFollowups: overdueFollowups.map(f => ({ lead: f.leadName, date: f.date, type: f.type, notes: f.notes })),
+      todaysFollowups: todaysFollowups.map(f => ({ lead: f.leadName, type: f.type, notes: f.notes })),
+      upcomingDeadlines: upcomingDeadlines.slice(0, 5),
+      recentLeads: recentLeads.map(l => ({
+        id: l.id, name: l.name, phone: l.phone, type: l.type,
+        category: l.category, score: l.score, status: l.status,
+        source: l.source, lastContact: l.lastContactDate, createdAt: l.createdAt?.split('T')[0],
+      })),
+      leads: leads.map(l => ({
+        id: l.id, name: l.name, phone: l.phone, email: l.email, type: l.type,
+        category: l.category, score: l.score, status: l.status,
+        source: l.source, lastContact: l.lastContactDate,
+        propertyType: l.propertyType, preferredLocations: l.preferredLocations,
+        budgetMin: l.budgetMin, budgetMax: l.budgetMax, timeline: l.timeline,
+        showingsCount: l.showingsCount, followupsCount: l.followupsCount,
+      })),
+      properties: properties.map(p => ({
+        id: p.id, title: p.title, type: p.type, location: p.location,
+        price: p.price, bedrooms: p.bedrooms, areaSqft: p.areaSqft,
+        listingType: p.listingType, status: p.status, showingsCount: p.showingsCount,
+      })),
+      campaigns: campaigns.map(c => ({
+        id: c.id, name: c.name, type: c.type, channels: c.channels,
+        status: c.status, leadsGenerated: c.leadsGenerated, createdAt: c.createdAt?.split('T')[0],
+      })),
+      transactions: transactions.map(t => ({
+        id: t.id, lead: t.leadName, property: t.propertyTitle,
+        salePrice: t.salePrice, status: t.status,
+        closeDate: t.closeDate, contractDate: t.contractDate,
+        pendingDocs: (t.documents || []).filter(d => d.status === 'pending').length,
+      })),
+    };
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(dashboard));
+  } catch (e) {
+    logger.error('[dashboard]', e.message);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: e.message }));
+  }
 });
 
 // --- Google OAuth callback (registered on public webhook server) ---
@@ -615,39 +984,48 @@ if (microsoftAuth.isConfigured()) {
   logger.info('Microsoft integration enabled (Outlook Mail)');
 }
 
-// --- GitHub App install callback (called by swayat.com GitHub OAuth callback) ---
+// --- GitHub App install callback ---
 
 const githubAuth = require('./github-auth');
 
 if (githubAuth.isConfigured()) {
-  provider.addRoute('POST', '/github/install', (req, res) => {
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', async () => {
-      try {
-        const { code, state, installationId } = JSON.parse(body);
-        if (!code || !state || !installationId) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ error: 'Missing code, state, or installationId' }));
-        }
+  // GET /auth/github/callback — GitHub redirects here after app installation
+  provider.addRoute('GET', '/auth/github/callback', async (req, res) => {
+    try {
+      const url = new URL(req.url, `http://localhost:${config.webhookPort}`);
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      const installationId = url.searchParams.get('installation_id');
+      const setupAction = url.searchParams.get('setup_action');
 
-        const result = await githubAuth.handleCallback(code, state, installationId);
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'connected', account: result.account }));
-
-        // Notify user on WhatsApp
-        await botSendMessage(result.waId,
-          `*GitHub connected!* 🎉\n\n` +
-          `Signed in as *${result.account}*.\n\n` +
-          `Use \`/repos\` to see your repos and \`/repo <name>\` to start working on one.`
-        );
-      } catch (e) {
-        logger.error('GitHub install callback error:', e.message);
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: e.message }));
+      if (setupAction === 'install' && !code) {
+        // User installed but no OAuth code — just show success
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<h2>GitHub App installed!</h2><p>Return to WhatsApp and use <code>/github</code> to check status.</p>');
+        return;
       }
-    });
+
+      if (!code || !state || !installationId) {
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end('<h2>Missing parameters.</h2><p>Please try <code>/github</code> again in WhatsApp.</p>');
+        return;
+      }
+
+      const result = await githubAuth.handleCallback(code, state, installationId);
+
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<h2>GitHub connected!</h2><p>Signed in as <b>${result.account}</b>.</p><p>You can close this window and return to WhatsApp.</p>`);
+
+      await botSendMessage(result.waId,
+        `*GitHub connected!*\n\n` +
+        `Signed in as *${result.account}*.\n\n` +
+        `Use \`/repos\` to see your repos and \`/repo <name>\` to start working on one.`
+      );
+    } catch (e) {
+      logger.error('GitHub install callback error:', e.message);
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<h2>Authorization failed.</h2><p>${e.message}</p><p>Please try <code>/github</code> again.</p>`);
+    }
   });
   logger.info('GitHub App integration enabled');
 }
@@ -767,6 +1145,41 @@ provider.on('ready', () => {
     }
   });
 
+  // Initialize nurture runner for real estate agent
+  const nurtureSendFn = async (chatId, text) => {
+    const sentId = await provider.sendMessage(chatId, text);
+    if (sentId) {
+      botSentMessageIds.add(sentId);
+      setTimeout(() => botSentMessageIds.delete(sentId), 30000);
+    }
+  };
+  nurtureRunner.init(nurtureSendFn);
+
+  // Run nurture cycle every 15 minutes
+  const cron = require('node-cron');
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      // Build chatId-to-dataPath map from sandbox state
+      const { getUserAgent, getAllChatIds } = require('./claude');
+      const chatIds = getAllChatIds ? getAllChatIds() : [];
+      const chatIdToDataPath = {};
+      for (const cid of chatIds) {
+        if (getUserAgent(cid) === 'real-estate') {
+          const { base } = sandbox.ensureSandboxDirs(cid);
+          const dataPath = require('path').join(base, 'workspace', 'agents', 'real-estate', 'realestate-data.json');
+          if (require('fs').existsSync(dataPath)) {
+            chatIdToDataPath[cid] = dataPath;
+          }
+        }
+      }
+      if (Object.keys(chatIdToDataPath).length > 0) {
+        await nurtureRunner.runNurtureCycle(chatIdToDataPath);
+      }
+    } catch (err) {
+      logger.error('[nurture-cron] Error:', err.message);
+    }
+  });
+
   // Recover interrupted tasks from previous run
   recoverInterruptedTasks();
 });
@@ -838,33 +1251,49 @@ provider.on('message', async (msg) => {
       );
       return;
     }
-  }
 
-  // Welcome message for first-time users (one greeting per user, not per chat)
-  if (!msg.fromMe && !isGreeted(senderId)) {
-    markGreeted(senderId);
-    await botSendMessage(chatId,
-      `Hey! 👋\n\n` +
-      `I'm your personal AI assistant — think of me as a teammate who never sleeps and loves a good challenge.\n\n` +
-      `*What can I do?*\n` +
-      `📝 Answer questions & write content\n` +
-      `🖼️ Analyze images — send one or multiple\n` +
-      `📄 Read documents — PDFs, Word, Excel\n` +
-      `🎵 Transcribe audio & voice messages\n` +
-      `🎬 Analyze videos\n` +
-      `📧 Send emails (once connected)\n` +
-      `💻 Write & run code in your own sandbox\n\n` +
-      `*Handy commands:*\n` +
-      `/files — See & download files from your workspace\n` +
-      `/gmail login — Connect your Gmail & Google Drive\n` +
-      `/resend — Set up email sending via Resend\n` +
-      `/sandbox — Check your workspace status\n` +
-      `/usage — See your token usage\n` +
-      `/stop — Cancel a running task\n` +
-      `/reset — Start fresh (clears session)\n` +
-      `/help — Full command list\n\n` +
-      `So, what's your first challenge? Let's go! 🚀`
-    );
+    // Send welcome message if it wasn't delivered (e.g. template failed)
+    const regData = getRegistrationData(senderId.replace('@c.us', ''));
+    if (regData && regData.welcomeSent === false) {
+      logger.info(`Welcome not yet sent for ${senderId} — sending agent welcome now`);
+      try {
+        const agents = require('./agents');
+        const agentId = regData.defaultAgent || getUserAgent(chatId) || 'general';
+        const agent = agents.getAgent(agentId);
+
+        // Set up the agent for the user
+        setUserAgent(chatId, agent.id);
+
+        // Send agent-specific welcome or default welcome
+        const firstName = regData.fullName ? regData.fullName.split(/\s+/)[0] : '';
+        const welcome = agent.welcome || (
+          `Hey${firstName ? ' ' + firstName : ''}! 👋\n\n` +
+          `I'm your personal AI assistant — think of me as a teammate who never sleeps and loves a good challenge.\n\n` +
+          `Try saying something like:\n\n` +
+          `📩 "Create an evite for my birthday party and email it to my friends"\n` +
+          `📊 "I took a photo of my expenses — organize them into a spreadsheet"\n` +
+          `✈️ "Plan a 5-day Tokyo itinerary and put it on my Google Calendar"\n` +
+          `📝 "Proofread my resume, fix the formatting, and send it back as a PDF"\n` +
+          `🎬 "Watch this video and write a summary with timestamps"\n\n` +
+          `Use your imagination and try me.\n\n` +
+          `What's on your mind? Let's tackle it! 🚀`
+        );
+        await botSendMessage(chatId, welcome);
+
+        // Mark welcome as sent via website API
+        const phone = '+' + senderId.replace('@c.us', '');
+        fetch(`https://swayat.com/api/user/welcome-sent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone }),
+        }).catch(err => logger.error(`Failed to mark welcome sent for ${phone}: ${err.message}`));
+
+        // Update cache so we don't send again
+        regData.welcomeSent = true;
+      } catch (err) {
+        logger.error(`Failed to send welcome to ${senderId}: ${err.message}`);
+      }
+    }
   }
 
   // Handle commands (text only)
@@ -918,7 +1347,12 @@ provider.on('message', async (msg) => {
       clearQuickReplies(chatId);
       clearPendingProjectPoll(chatId);
       resetTokenUsage(chatId);
-      pendingFilePolls.delete(chatId);
+      // Clear conversation history for the current agent
+      const resetSbKey = getSandboxKey(chatId, senderId || config.whitelistedNumber);
+      const resetAgentId = getUserAgent(chatId);
+      clearConversationHistory(resetSbKey, resetAgentId);
+      const resetFilePollKey = isGroup ? `${chatId}:${senderId}` : chatId;
+      pendingFilePolls.delete(resetFilePollKey);
       // Clear any pending media batch
       const batch = mediaBatch.get(chatId);
       if (batch && batch.timer) clearTimeout(batch.timer);
@@ -1234,17 +1668,32 @@ provider.on('message', async (msg) => {
     // /files — list files in the workspace (sandbox-only for security)
     if (caption.toLowerCase() === '/files') {
       if (!config.sandboxEnabled || !sandbox.isBwrapAvailable()) {
-        await botReply(msg, '📂 Your session is not active yet. Send me a message first and I\'ll set up your workspace.');
+        await botReply(msg, '📂 Sandbox is not enabled. Set SANDBOX_ENABLED=true in .env to use workspaces.');
         return;
       }
-      const sbStatus = sandbox.getSandboxStatus(chatId);
-      const workspaceDir = sbStatus.workspaceDir;
+      const filesSbKey = getSandboxKey(chatId, senderId || config.whitelistedNumber);
+      const workspaceDir = path.join(sandbox.getSandboxDir(filesSbKey), 'workspace');
 
+      if (!fs.existsSync(workspaceDir)) {
+        await botReply(msg, '📂 Your workspace hasn\'t been created yet. Send me a message first and I\'ll set it up.');
+        return;
+      }
+
+      // Recursively collect all files
       let entries = [];
       try {
-        entries = fs.readdirSync(workspaceDir)
-          .map(name => ({ name, fullPath: path.join(workspaceDir, name) }))
-          .filter(e => fs.statSync(e.fullPath).isFile());
+        const scanFiles = (dir, prefix = '') => {
+          for (const name of fs.readdirSync(dir)) {
+            const fullPath = path.join(dir, name);
+            try {
+              const stat = fs.statSync(fullPath);
+              const relPath = prefix ? `${prefix}/${name}` : name;
+              if (stat.isFile()) entries.push({ name: relPath, fullPath });
+              else if (stat.isDirectory() && !name.startsWith('.')) scanFiles(fullPath, relPath);
+            } catch {}
+          }
+        };
+        scanFiles(workspaceDir);
       } catch (e) {
         await botReply(msg, `📂 No files found (${e.message})`);
         return;
@@ -1255,7 +1704,9 @@ provider.on('message', async (msg) => {
         return;
       }
 
-      pendingFilePolls.set(chatId, { files: entries });
+      // Key file polls per-sender so users can't access each other's files in groups
+      const filePollKey = isGroup ? `${chatId}:${senderId}` : chatId;
+      pendingFilePolls.set(filePollKey, { files: entries });
 
       const fileList = entries.map((e, i) => {
         const stat = fs.statSync(e.fullPath);
@@ -1620,6 +2071,97 @@ provider.on('message', async (msg) => {
       return;
     }
 
+    // /social [status|connect|disconnect|posts] — FreeTools social media publishing
+    const socialMatch = caption.match(/^\/social(?:\s+(.*))?$/is);
+    if (socialMatch) {
+      const rawArgs = (socialMatch[1] || '').trim();
+      const subcommand = rawArgs.toLowerCase().split(/\s+/)[0] || '';
+      const ftSenderId = isGroup ? senderId : chatId;
+
+      // /social or /social status
+      if (!subcommand || subcommand === 'status') {
+        try {
+          await botReply(msg, 'Checking your social accounts...');
+          const accounts = await freetoolsAuth.listAccounts(ftSenderId);
+          if (!accounts || accounts.length === 0) {
+            await botReply(msg, `*Social Publishing*\n\nNo social accounts connected yet.\n\nConnect an account:\n\`/social connect twitter\`\n\`/social connect linkedin\`\n\`/social connect instagram\``);
+          } else {
+            const lines = accounts.map(a => `• *${a.platform}* — @${a.account_username || a.account_id}`).join('\n');
+            await botReply(msg, `*Connected social accounts:*\n\n${lines}\n\nUse \`/social connect <platform>\` to add more.\nUse \`/social disconnect <platform>\` to remove.`);
+          }
+        } catch (e) {
+          await botReply(msg, `❌ Failed to check accounts: ${e.message}`);
+        }
+        return;
+      }
+
+      // /social connect <platform>
+      if (subcommand === 'connect') {
+        const platform = rawArgs.split(/\s+/)[1] || '';
+        const platformMap = { twitter: 'TWITTER', x: 'TWITTER', linkedin: 'LINKEDIN', instagram: 'INSTAGRAM', ig: 'INSTAGRAM' };
+        const normalized = platformMap[platform.toLowerCase()];
+        if (!normalized) {
+          await botReply(msg, 'Usage: `/social connect <platform>`\n\nSupported: `twitter`, `linkedin`, `instagram`');
+          return;
+        }
+        try {
+          const url = await freetoolsAuth.getConnectUrl(ftSenderId, normalized);
+          const names = { TWITTER: 'X (Twitter)', LINKEDIN: 'LinkedIn', INSTAGRAM: 'Instagram' };
+          await botReply(msg, `*Connect ${names[normalized]}*\n\nTap the link below to authorize:\n${url}\n\n_After connecting, ask me to post on your behalf!_`);
+        } catch (e) {
+          await botReply(msg, `❌ Failed to get connect URL: ${e.message}`);
+        }
+        return;
+      }
+
+      // /social disconnect <platform>
+      if (subcommand === 'disconnect') {
+        const platform = rawArgs.split(/\s+/)[1] || '';
+        const platformMap = { twitter: 'TWITTER', x: 'TWITTER', linkedin: 'LINKEDIN', instagram: 'INSTAGRAM', ig: 'INSTAGRAM' };
+        const normalized = platformMap[platform.toLowerCase()];
+        if (!normalized) {
+          await botReply(msg, 'Usage: `/social disconnect <platform>`\n\nSupported: `twitter`, `linkedin`, `instagram`');
+          return;
+        }
+        try {
+          const accounts = await freetoolsAuth.listAccounts(ftSenderId, normalized);
+          if (!accounts || accounts.length === 0) {
+            await botReply(msg, `No ${normalized} account connected.`);
+            return;
+          }
+          for (const acc of accounts) {
+            await freetoolsAuth.disconnectSocialAccount(ftSenderId, acc.id);
+          }
+          await botReply(msg, `✅ ${normalized} account disconnected.`);
+        } catch (e) {
+          await botReply(msg, `❌ Failed to disconnect: ${e.message}`);
+        }
+        return;
+      }
+
+      // /social posts
+      if (subcommand === 'posts') {
+        try {
+          const posts = await freetoolsAuth.listPosts(ftSenderId);
+          if (!posts || posts.length === 0) {
+            await botReply(msg, 'No scheduled or published posts found.');
+          } else {
+            const lines = posts.slice(0, 10).map((p, i) =>
+              `*${i + 1}.* ${p.status} — ${p.scheduled_time || 'now'}\n   ${(p.caption || '').slice(0, 60)}...`
+            ).join('\n\n');
+            await botReply(msg, `*Your posts:*\n\n${lines}`);
+          }
+        } catch (e) {
+          await botReply(msg, `❌ Failed to list posts: ${e.message}`);
+        }
+        return;
+      }
+
+      // Unknown — show help
+      await botReply(msg, `*Social Publishing commands:*\n\n\`/social\` — Show connected accounts\n\`/social connect twitter\` — Connect X (Twitter)\n\`/social connect linkedin\` — Connect LinkedIn\n\`/social connect instagram\` — Connect Instagram\n\`/social disconnect <platform>\` — Remove account\n\`/social posts\` — List your posts\n\nOr just ask me: _"Post this to my LinkedIn: ..."_`);
+      return;
+    }
+
     // /repos — list connected GitHub repos
     if (caption.toLowerCase() === '/repos') {
       if (!githubAuth.isConfigured()) {
@@ -1810,10 +2352,18 @@ provider.on('message', async (msg) => {
       const idx = parseInt(numMatch[1], 10) - 1;
 
       // Check if this is a file selection (TASK-005)
-      const filePoll = pendingFilePolls.get(chatId);
+      const filePollKey = isGroup ? `${chatId}:${senderId}` : chatId;
+      const filePoll = pendingFilePolls.get(filePollKey);
       if (filePoll && idx >= 0 && idx < filePoll.files.length) {
-        pendingFilePolls.delete(chatId);
+        pendingFilePolls.delete(filePollKey);
         const { name, fullPath } = filePoll.files[idx];
+        // Verify the file is within the sender's own workspace (prevent path traversal)
+        const dlSbKey = getSandboxKey(chatId, senderId || config.whitelistedNumber);
+        const dlWorkspace = path.join(sandbox.getSandboxDir(dlSbKey), 'workspace');
+        if (!fullPath.startsWith(dlWorkspace + path.sep) && fullPath !== dlWorkspace) {
+          await botReply(msg, '❌ Access denied.');
+          return;
+        }
         const stat = fs.statSync(fullPath);
         const WA_MAX_BYTES = 16 * 1024 * 1024; // 16MB WhatsApp limit
 
@@ -1834,9 +2384,16 @@ provider.on('message', async (msg) => {
         } else {
           await botReply(msg, `📤 Sending *${name}*...`);
           try {
-            await provider.replyWithMedia(msg, fullPath, { sendMediaAsDocument: true });
+            // Send images/videos/audio as native types, others as documents
+            const dlExt = path.extname(name).toLowerCase();
+            const dlNativeMedia = ['.jpg','.jpeg','.png','.webp','.gif','.mp4','.ogg','.mp3'].includes(dlExt);
+            await provider.replyWithMedia(msg, fullPath, { sendMediaAsDocument: !dlNativeMedia });
           } catch (e) {
-            await botReply(msg, `❌ Failed to send file: ${e.message}`);
+            if (e.message === 'UNSUPPORTED_FILE_TYPE') {
+              await botReply(msg, `📎 WhatsApp doesn't support sending *${e.fileType}* files directly.\n\nSupported formats: images (jpg, png, webp), video (mp4), audio (mp3, ogg, aac), documents (pdf, docx, xlsx, pptx, txt, csv, zip).`);
+            } else {
+              await botReply(msg, `📎 Couldn't deliver *${name}* via WhatsApp right now. Please try again later.`);
+            }
           }
         }
         return;
@@ -1979,6 +2536,264 @@ provider.on('message', async (msg) => {
   // Text-only messages: process immediately
   await handlePrompt(msg, chatId, caption, null, senderName, senderId);
 });
+
+// ── Job Search API (JSearch + free fallbacks + result caching) ──────────────
+
+const JOB_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours — job listings don't change that fast
+const jobSearchCache = new Map(); // cacheKey → { data, ts }
+
+function jobCacheKey(query, location, remote, page) {
+  return `${(query || '').toLowerCase().trim()}|${(location || '').toLowerCase().trim()}|${!!remote}|${page || 1}`;
+}
+
+function getCachedJobs(key) {
+  const cached = jobSearchCache.get(key);
+  if (cached && Date.now() - cached.ts < JOB_CACHE_TTL) return cached.data;
+  return null;
+}
+
+function setCachedJobs(key, data) {
+  jobSearchCache.set(key, { data, ts: Date.now() });
+  // Prune cache if it gets too large (keep last 200 queries)
+  if (jobSearchCache.size > 200) {
+    const oldest = [...jobSearchCache.entries()].sort((a, b) => a[1].ts - b[1].ts);
+    for (let i = 0; i < oldest.length - 200; i++) {
+      jobSearchCache.delete(oldest[i][0]);
+    }
+  }
+}
+
+async function searchJobs({ query, location, remote, page }) {
+  const cacheKey = jobCacheKey(query, location, remote, page);
+  const cached = getCachedJobs(cacheKey);
+  if (cached) {
+    logger.info(`Job search cache hit: ${cacheKey}`);
+    return { ...cached, cached: true };
+  }
+
+  const results = [];
+  const sources = [];
+
+  // 1. Try JSearch (RapidAPI) if API key is configured
+  if (config.jsearchApiKey) {
+    try {
+      const jsearchResults = await searchJSearch(query, location, remote, page);
+      results.push(...jsearchResults);
+      sources.push('jsearch');
+    } catch (e) {
+      logger.warn(`JSearch API error: ${e.message}`);
+    }
+  }
+
+  // 2. Free APIs as additional sources (or fallback when JSearch unavailable)
+  const freeResults = await Promise.allSettled([
+    searchRemotive(query, location),
+    searchArbeitnow(query, location),
+  ]);
+
+  for (const r of freeResults) {
+    if (r.status === 'fulfilled' && r.value.length > 0) {
+      results.push(...r.value);
+      sources.push(r.value[0]?.source || 'free');
+    }
+  }
+
+  // Deduplicate by normalizing company+title
+  const seen = new Set();
+  const deduped = [];
+  for (const job of results) {
+    const key = `${(job.company || '').toLowerCase()}|${(job.title || '').toLowerCase()}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(job);
+    }
+  }
+
+  const response = {
+    jobs: deduped.slice(0, 20),
+    totalFound: deduped.length,
+    sources,
+    query,
+    location: location || null,
+    remote: remote || false,
+    page: page || 1,
+  };
+
+  setCachedJobs(cacheKey, response);
+  return response;
+}
+
+async function searchJSearch(query, location, remote, page) {
+  let searchQuery = query;
+  if (location) searchQuery += ` in ${location}`;
+  if (remote) searchQuery += ' remote';
+
+  const params = new URLSearchParams({
+    query: searchQuery,
+    page: String(page || 1),
+    num_pages: '1',
+  });
+  if (remote) params.set('remote_jobs_only', 'true');
+
+  const res = await fetch(`https://jsearch.p.rapidapi.com/search?${params}`, {
+    headers: {
+      'X-RapidAPI-Key': config.jsearchApiKey,
+      'X-RapidAPI-Host': 'jsearch.p.rapidapi.com',
+    },
+  });
+
+  if (!res.ok) throw new Error(`JSearch HTTP ${res.status}`);
+  const data = await res.json();
+
+  return (data.data || []).map(job => ({
+    id: job.job_id,
+    title: job.job_title,
+    company: job.employer_name,
+    location: job.job_city ? `${job.job_city}, ${job.job_state || ''} ${job.job_country || ''}`.trim() : job.job_country || 'Unknown',
+    remote: job.job_is_remote || false,
+    type: job.job_employment_type || null,
+    salary: job.job_min_salary && job.job_max_salary
+      ? `$${job.job_min_salary.toLocaleString()} - $${job.job_max_salary.toLocaleString()}`
+      : null,
+    description: (job.job_description || '').slice(0, 500),
+    url: job.job_apply_link || job.job_google_link || null,
+    postedAt: job.job_posted_at_datetime_utc || null,
+    source: 'jsearch',
+    employer_logo: job.employer_logo || null,
+  }));
+}
+
+async function searchRemotive(query, location) {
+  try {
+    const params = new URLSearchParams({ search: query, limit: '10' });
+    const res = await fetch(`https://remotive.com/api/remote-jobs?${params}`, {
+      headers: { 'User-Agent': 'SwayatJobHunter/1.0' },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+
+    return (data.jobs || []).map(job => ({
+      id: `remotive_${job.id}`,
+      title: job.title,
+      company: job.company_name,
+      location: job.candidate_required_location || 'Remote',
+      remote: true,
+      type: job.job_type || null,
+      salary: job.salary || null,
+      description: (job.description || '').replace(/<[^>]*>/g, '').slice(0, 500),
+      url: job.url || null,
+      postedAt: job.publication_date || null,
+      source: 'remotive',
+      tags: job.tags || [],
+    }));
+  } catch (e) {
+    logger.warn(`Remotive API error: ${e.message}`);
+    return [];
+  }
+}
+
+async function searchArbeitnow(query, location) {
+  try {
+    const params = new URLSearchParams();
+    if (query) params.set('search', query);
+    if (location) params.set('location', location);
+
+    const res = await fetch(`https://www.arbeitnow.com/api/job-board-api?${params}`, {
+      headers: { 'User-Agent': 'SwayatJobHunter/1.0' },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+
+    return (data.data || []).map(job => ({
+      id: `arbeitnow_${job.slug}`,
+      title: job.title,
+      company: job.company_name,
+      location: job.location || 'Unknown',
+      remote: job.remote || false,
+      type: null,
+      salary: null,
+      description: (job.description || '').replace(/<[^>]*>/g, '').slice(0, 500),
+      url: job.url || null,
+      postedAt: job.created_at ? new Date(job.created_at * 1000).toISOString() : null,
+      source: 'arbeitnow',
+      tags: job.tags || [],
+    }));
+  } catch (e) {
+    logger.warn(`Arbeitnow API error: ${e.message}`);
+    return [];
+  }
+}
+
+async function getJobDetails(jobId, source) {
+  // For JSearch, fetch by job_id
+  if ((source === 'jsearch' || !source) && config.jsearchApiKey && !jobId.startsWith('remotive_') && !jobId.startsWith('arbeitnow_')) {
+    const params = new URLSearchParams({ job_id: jobId });
+    const res = await fetch(`https://jsearch.p.rapidapi.com/job-details?${params}`, {
+      headers: {
+        'X-RapidAPI-Key': config.jsearchApiKey,
+        'X-RapidAPI-Host': 'jsearch.p.rapidapi.com',
+      },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const job = data.data?.[0];
+      if (job) {
+        return {
+          id: job.job_id,
+          title: job.job_title,
+          company: job.employer_name,
+          location: job.job_city ? `${job.job_city}, ${job.job_state || ''} ${job.job_country || ''}`.trim() : job.job_country,
+          remote: job.job_is_remote || false,
+          type: job.job_employment_type || null,
+          salary: job.job_min_salary && job.job_max_salary
+            ? `$${job.job_min_salary.toLocaleString()} - $${job.job_max_salary.toLocaleString()}`
+            : null,
+          description: job.job_description || '',
+          qualifications: job.job_highlights?.Qualifications || [],
+          responsibilities: job.job_highlights?.Responsibilities || [],
+          benefits: job.job_highlights?.Benefits || [],
+          url: job.job_apply_link || job.job_google_link || null,
+          postedAt: job.job_posted_at_datetime_utc || null,
+          source: 'jsearch',
+        };
+      }
+    }
+  }
+
+  // Fallback — return the ID so Claude can tell the user
+  return { error: 'Job details not available for this source. Use the URL from the search results to view the full listing.' };
+}
+
+async function getCompanyInfo(company) {
+  // The Muse API — free, no key required
+  try {
+    const params = new URLSearchParams({ name: company });
+    const res = await fetch(`https://www.themuse.com/api/public/companies?${params}`, {
+      headers: { 'User-Agent': 'SwayatJobHunter/1.0' },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const match = data.results?.[0];
+      if (match) {
+        return {
+          name: match.name,
+          description: match.description || null,
+          shortDescription: match.short_description || null,
+          industries: match.industries?.map(i => i.name) || [],
+          locations: match.locations?.map(l => l.name) || [],
+          size: match.size?.name || null,
+          website: match.refs?.landing_page || null,
+          logo: match.refs?.logo_image || null,
+          source: 'themuse',
+        };
+      }
+    }
+  } catch (e) {
+    logger.warn(`The Muse API error: ${e.message}`);
+  }
+
+  return { name: company, description: null, note: 'Company not found in The Muse directory. Try using WebSearch for more info.' };
+}
 
 // --- Internal HTTP API for external services (e.g. Shorty trading bot) ---
 const http = require('http');
@@ -2385,6 +3200,355 @@ const apiServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: e.message }));
       }
     });
+  // ── GitHub API endpoints (for GitHub MCP server) ───────────────────────────
+
+  } else if (req.method === 'POST' && req.url === '/github/repos') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId } = JSON.parse(body);
+        if (!chatId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId required' })); }
+        const repos = await githubAuth.listRepos(chatId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ repos }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/github/get-file') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, repo, path: filePath, ref } = JSON.parse(body);
+        if (!chatId || !repo || !filePath) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId, repo, and path required' })); }
+        const file = await githubAuth.getFile(chatId, repo, filePath, ref);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(file));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/github/list-files') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, repo, path: dirPath, ref } = JSON.parse(body);
+        if (!chatId || !repo) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId and repo required' })); }
+        const files = await githubAuth.listFiles(chatId, repo, dirPath, ref);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ files }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/github/create-or-update-file') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, repo, path: filePath, content, message, branch, sha } = JSON.parse(body);
+        if (!chatId || !repo || !filePath || content === undefined || !message) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId, repo, path, content, and message required' })); }
+        const result = await githubAuth.createOrUpdateFile(chatId, repo, filePath, content, message, branch, sha);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/github/list-branches') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, repo } = JSON.parse(body);
+        if (!chatId || !repo) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId and repo required' })); }
+        const branches = await githubAuth.listBranches(chatId, repo);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ branches }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/github/create-branch') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, repo, branch, fromBranch } = JSON.parse(body);
+        if (!chatId || !repo || !branch || !fromBranch) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId, repo, branch, and fromBranch required' })); }
+        const result = await githubAuth.createBranch(chatId, repo, branch, fromBranch);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/github/list-prs') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, repo, state } = JSON.parse(body);
+        if (!chatId || !repo) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId and repo required' })); }
+        const prs = await githubAuth.listPullRequests(chatId, repo, state);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ pullRequests: prs }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/github/create-pr') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, repo, title, head, base, body: prBody } = JSON.parse(body);
+        if (!chatId || !repo || !title || !head || !base) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId, repo, title, head, and base required' })); }
+        const result = await githubAuth.createPullRequest(chatId, repo, title, head, base, prBody);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/github/list-issues') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, repo, state } = JSON.parse(body);
+        if (!chatId || !repo) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId and repo required' })); }
+        const issues = await githubAuth.listIssues(chatId, repo, state);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ issues }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/github/create-issue') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, repo, title, body: issueBody, labels } = JSON.parse(body);
+        if (!chatId || !repo || !title) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId, repo, and title required' })); }
+        const result = await githubAuth.createIssue(chatId, repo, title, issueBody, labels);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/github/search-code') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, query, repo } = JSON.parse(body);
+        if (!chatId || !query) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId and query required' })); }
+        const result = await githubAuth.searchCode(chatId, query, repo);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+
+  // ── Job Hunter API endpoints ──────────────────────────────────────────────
+  } else if (req.method === 'POST' && req.url === '/jobs/search') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { query, location, remote, page } = JSON.parse(body);
+        if (!query) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'query required' }));
+        }
+        const result = await searchJobs({ query, location, remote, page });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+
+  } else if (req.method === 'POST' && req.url === '/jobs/details') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { jobId, source } = JSON.parse(body);
+        if (!jobId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'jobId required' }));
+        }
+        const result = await getJobDetails(jobId, source);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+
+  } else if (req.method === 'POST' && req.url === '/jobs/company') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { company } = JSON.parse(body);
+        if (!company) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'company required' }));
+        }
+        const result = await getCompanyInfo(company);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+
+  // ── FreeTools social publishing API endpoints ─────────────────────────────
+
+  } else if (req.method === 'POST' && req.url === '/freetools/connect-url') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, platform } = JSON.parse(body);
+        if (!chatId || !platform) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId and platform required' }));
+        }
+        const url = await freetoolsAuth.getConnectUrl(chatId, platform);
+        const names = { TWITTER: 'X (Twitter)', LINKEDIN: 'LinkedIn', INSTAGRAM: 'Instagram' };
+        const name = names[platform.toUpperCase()] || platform;
+        // Send URL directly via WhatsApp — keeps JWT out of Claude's response and avoids security filter redaction
+        await botSendMessage(chatId, `*Connect ${name}*\n\nTap the link below to authorize:\n${url}\n\n_After connecting, ask me to post on your behalf!_`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'link_sent', platform, message: `${name} connect link sent to the user via WhatsApp.` }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+
+  } else if (req.method === 'POST' && req.url === '/freetools/list-accounts') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, platform } = JSON.parse(body);
+        if (!chatId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId required' }));
+        }
+        const accounts = await freetoolsAuth.listAccounts(chatId, platform || null);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ accounts }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+
+  } else if (req.method === 'POST' && req.url === '/freetools/disconnect-account') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, accountId } = JSON.parse(body);
+        if (!chatId || !accountId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId and accountId required' }));
+        }
+        await freetoolsAuth.disconnectSocialAccount(chatId, accountId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'disconnected', accountId }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+
+  } else if (req.method === 'POST' && req.url === '/freetools/publish-now') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, accountIds, caption, mediaUrl, mediaType, filePath } = JSON.parse(body);
+        if (!chatId || !accountIds || !caption) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, accountIds, and caption required' }));
+        }
+        // If filePath provided (local workspace file), serve it temporarily as a public URL
+        let resolvedMediaUrl = mediaUrl || null;
+        if (!resolvedMediaUrl && filePath) {
+          resolvedMediaUrl = serveWorkspaceFile(chatId, filePath);
+          if (!resolvedMediaUrl) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'WEBHOOK_BASE_URL not configured or file not found. Cannot serve media for social posts.' }));
+          }
+        }
+        const result = await freetoolsAuth.publishNow(chatId, accountIds, caption, resolvedMediaUrl, mediaType || null);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+
+  } else if (req.method === 'POST' && req.url === '/freetools/schedule-post') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, accountIds, caption, scheduledTime, mediaUrl, mediaType, filePath } = JSON.parse(body);
+        if (!chatId || !accountIds || !caption || !scheduledTime) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, accountIds, caption, and scheduledTime required' }));
+        }
+        let resolvedMediaUrl = mediaUrl || null;
+        if (!resolvedMediaUrl && filePath) {
+          resolvedMediaUrl = serveWorkspaceFile(chatId, filePath);
+          if (!resolvedMediaUrl) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'WEBHOOK_BASE_URL not configured or file not found. Cannot serve media for social posts.' }));
+          }
+        }
+        const result = await freetoolsAuth.schedulePost(chatId, accountIds, caption, scheduledTime, resolvedMediaUrl, mediaType || null);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+
+  } else if (req.method === 'POST' && req.url === '/freetools/list-posts') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId } = JSON.parse(body);
+        if (!chatId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId required' }));
+        }
+        const posts = await freetoolsAuth.listPosts(chatId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ posts }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+
+  } else if (req.method === 'POST' && req.url === '/freetools/delete-post') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, postId } = JSON.parse(body);
+        if (!chatId || !postId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId and postId required' }));
+        }
+        await freetoolsAuth.deletePost(chatId, postId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'deleted', postId }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+
   } else if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok' }));

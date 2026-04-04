@@ -8,6 +8,28 @@ const pool = new Pool({
 
 export default pool;
 
+// --- Waitlist ---
+
+export async function addToWaitlist(
+  fullName: string,
+  email: string,
+  businessType?: string
+): Promise<{ success: boolean; error?: string }> {
+  const existing = await pool.query(
+    "SELECT 1 FROM waitlist WHERE email = $1",
+    [email.toLowerCase()]
+  );
+  if ((existing.rowCount ?? 0) > 0) {
+    return { success: false, error: "You're already on the waitlist!" };
+  }
+
+  await pool.query(
+    "INSERT INTO waitlist (full_name, email, business_type) VALUES ($1, $2, $3)",
+    [fullName, email.toLowerCase(), businessType || null]
+  );
+  return { success: true };
+}
+
 // --- Promo codes ---
 
 export interface PromoCode {
@@ -59,6 +81,8 @@ export interface User {
   subscription_status: string;
   last_payment_at: string | null;
   default_agent: string;
+  business_type: string | null;
+  welcome_sent: boolean;
 }
 
 export async function getUser(phone: string): Promise<User | null> {
@@ -71,7 +95,7 @@ export async function getUser(phone: string): Promise<User | null> {
 
 export async function createUser(
   phone: string,
-  opts: { defaultAgent?: string; fullName?: string; email?: string } = {}
+  opts: { defaultAgent?: string; fullName?: string; email?: string; businessType?: string } = {}
 ): Promise<{ success: boolean; error?: string; user?: User }> {
   const existing = await getUser(phone);
   if (existing) {
@@ -79,13 +103,20 @@ export async function createUser(
   }
 
   const result = await pool.query<User>(
-    `INSERT INTO users (phone, full_name, email, status, subscription_status, default_agent)
-     VALUES ($1, $2, $3, 'active', 'active', $4)
+    `INSERT INTO users (phone, full_name, email, status, subscription_status, default_agent, business_type, welcome_sent)
+     VALUES ($1, $2, $3, 'active', 'active', $4, $5, false)
      RETURNING *`,
-    [phone, opts.fullName || null, opts.email || null, opts.defaultAgent || "general"]
+    [phone, opts.fullName || null, opts.email || null, opts.defaultAgent || "business", opts.businessType || null]
   );
 
   return { success: true, user: result.rows[0] };
+}
+
+export async function markWelcomeSent(phone: string): Promise<void> {
+  await pool.query(
+    "UPDATE users SET welcome_sent = true WHERE phone = $1",
+    [phone]
+  );
 }
 
 // --- Subscription lookups ---

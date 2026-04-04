@@ -22,6 +22,9 @@ export async function GET(request: Request) {
       registered: true,
       status: user.status,
       trialExpiresAt: user.trial_expires_at,
+      welcomeSent: user.welcome_sent,
+      defaultAgent: user.default_agent,
+      fullName: user.full_name,
     });
   } catch {
     return NextResponse.json(
