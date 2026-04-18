@@ -93,9 +93,12 @@ export default function SignupForm() {
 
   return (
     <section id="signup" className="px-6 py-24">
-      <div className="mx-auto max-w-2xl">
-        <h2 className="text-center text-3xl font-bold text-heading sm:text-4xl">
-          Get started with <span className="text-primary">Swayat AI</span>
+      <div className="mx-auto max-w-xl">
+        <h2 className="text-center text-3xl font-bold tracking-tight text-heading sm:text-4xl">
+          Get started with{" "}
+          <span className="bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
+            Swayat AI
+          </span>
         </h2>
         <p className="mt-4 text-center text-body">
           Create your account in seconds. No credit card required &mdash; start

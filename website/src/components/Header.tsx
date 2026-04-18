@@ -3,14 +3,14 @@ import { Logo } from "./Logo";
 export default function Header() {
   return (
     <header className="fixed top-0 z-50 w-full border-b border-slate-200 bg-white/80 backdrop-blur-lg">
-      <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+      <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3.5">
         <a href="/" className="transition hover:opacity-80">
           <Logo iconSize={28} />
         </a>
         <nav className="flex items-center gap-6">
           <div className="group relative hidden sm:inline-block">
             <a
-              href="#features"
+              href="/#features"
               className="text-sm text-body transition hover:text-heading"
             >
               Features
@@ -27,7 +27,7 @@ export default function Header() {
             </div>
           </div>
           <a
-            href="#pricing"
+            href="/#pricing"
             className="hidden text-sm text-body transition hover:text-heading sm:inline"
           >
             Pricing
@@ -45,7 +45,7 @@ export default function Header() {
             Sign In
           </a>
           <a
-            href="#signup"
+            href="/#signup"
             className="rounded-full bg-primary px-5 py-2 text-sm font-semibold text-white transition hover:bg-primary-dark"
           >
             Get Started

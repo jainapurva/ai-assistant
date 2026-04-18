@@ -22,14 +22,16 @@ const steps = [
 export default function HowItWorks() {
   return (
     <section id="how-it-works" className="bg-surface-light px-6 py-24">
-      <div className="mx-auto max-w-4xl">
-        <h2 className="text-center text-3xl font-bold text-heading sm:text-4xl">
-          From sign-up to <span className="text-primary">more profit</span> in
-          3 steps
+      <div className="mx-auto max-w-3xl">
+        <h2 className="text-center text-3xl font-bold tracking-tight text-heading sm:text-4xl">
+          From sign-up to{" "}
+          <span className="bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
+            more profit
+          </span>{" "}
+          in 3 steps
         </h2>
 
-        <div className="relative mt-16 grid gap-10 sm:grid-cols-3">
-          {/* Connector line (visible on sm+) */}
+        <div className="relative mt-14 grid gap-8 sm:grid-cols-3">
           <div className="pointer-events-none absolute top-7 left-[16.67%] right-[16.67%] hidden h-0.5 bg-gradient-to-r from-primary/30 via-primary/50 to-primary/30 sm:block" />
 
           {steps.map((s) => (
@@ -47,7 +49,6 @@ export default function HowItWorks() {
           ))}
         </div>
 
-        {/* CTA */}
         <div className="mt-14 text-center">
           <a
             href="#signup"

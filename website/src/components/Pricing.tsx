@@ -1,5 +1,7 @@
 "use client";
 
+import { CheckIcon } from "./Icons";
+
 const tiers = [
   {
     name: "Starter",
@@ -53,15 +55,17 @@ export default function Pricing() {
   return (
     <section id="pricing" className="px-6 py-24">
       <div className="mx-auto max-w-5xl">
-        <h2 className="text-center text-3xl font-bold text-heading sm:text-4xl">
-          Simple, transparent <span className="text-primary">pricing</span>
+        <h2 className="text-center text-3xl font-bold tracking-tight text-heading sm:text-4xl">
+          Simple, transparent{" "}
+          <span className="bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">
+            pricing
+          </span>
         </h2>
         <p className="mx-auto mt-4 max-w-lg text-center text-body">
           Start free. Upgrade when you&apos;re ready.
         </p>
 
-        {/* Pricing cards */}
-        <div className="mt-12 grid gap-8 sm:grid-cols-3">
+        <div className="mt-12 grid gap-6 sm:grid-cols-3">
           {tiers.map((tier) => (
             <div
               key={tier.name}
@@ -82,7 +86,7 @@ export default function Pricing() {
               </h3>
 
               <div className="mt-4 flex items-baseline gap-1">
-                <span className="text-4xl font-extrabold text-heading">
+                <span className="text-4xl font-extrabold tracking-tight text-heading">
                   {tier.price}
                 </span>
                 {tier.period && (
@@ -96,19 +100,7 @@ export default function Pricing() {
                     key={feature}
                     className="flex items-start gap-2 text-sm text-body"
                   >
-                    <svg
-                      className="mt-0.5 h-4 w-4 shrink-0 text-primary"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                      strokeWidth={2.5}
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M5 13l4 4L19 7"
-                      />
-                    </svg>
+                    <CheckIcon size={16} className="mt-0.5 shrink-0 text-primary" />
                     {feature}
                   </li>
                 ))}
@@ -128,7 +120,6 @@ export default function Pricing() {
           ))}
         </div>
 
-        {/* Notes */}
         <p className="mt-10 text-center text-sm text-muted">
           All plans include WhatsApp end-to-end encryption. No credit card
           required to get started.
