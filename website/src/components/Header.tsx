@@ -45,10 +45,10 @@ export default function Header() {
             Sign In
           </a>
           <a
-            href="#waitlist"
+            href="#signup"
             className="rounded-full bg-primary px-5 py-2 text-sm font-semibold text-white transition hover:bg-primary-dark"
           >
-            Join Waitlist
+            Get Started
           </a>
         </nav>
       </div>

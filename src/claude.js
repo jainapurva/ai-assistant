@@ -1,14 +1,25 @@
-const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
-const { buildSafeEnv, filterSensitiveOutput, sanitizePaths, SECURITY_SYSTEM_PROMPT } = require('./security');
+const { filterSensitiveOutput, sanitizePaths, SECURITY_SYSTEM_PROMPT } = require('./security');
+
+// Claude Agent SDK — ESM dynamic import from CommonJS
+let sdkPromise;
+function getSDK() {
+  if (!sdkPromise) sdkPromise = import('@anthropic-ai/claude-agent-sdk');
+  return sdkPromise;
+}
+// Allow tests to inject a mock SDK
+function _setSDKForTesting(mockSDK) {
+  sdkPromise = Promise.resolve(mockSDK);
+}
 const sandbox = require('./sandbox');
 const googleAuth = require('./google-auth');
 const microsoftAuth = require('./microsoft-auth');
 const resendAuth = require('./resend-auth');
 const githubAuth = require('./github-auth');
+const shopifyAuth = require('./shopify-auth');
 const freetoolsAuth = require('./freetools-auth');
 const activity = require('./activity-logger');
 const agents = require('./agents');
@@ -29,8 +40,8 @@ const activeAgents = new Map();
 // Per-chat model override (chatId -> model string)
 const chatModels = new Map();
 
-// Active claude subprocess per chat (chatId -> { proc, startTime, prompt })
-const activeProcesses = new Map();
+// Active SDK queries per chat (chatId -> { abortController, startTime, prompt })
+const activeQueries = new Map();
 
 // Task history per chat (chatId -> array of last 5 completed tasks)
 const taskHistory = new Map();
@@ -51,9 +62,7 @@ const isolatedGroups = new Set();
 const pendingTasks = new Map();    // chatId -> task descriptor (in-progress tasks)
 const persistedQueue = new Map();  // chatId -> [queue entries] (waiting messages)
 
-// --- Global concurrency limiter for Claude CLI processes ---
-// Claude CLI uses local state (~/.claude/) and concurrent processes can collide,
-// causing "exited with code 1" errors when multiple chats fire simultaneously.
+// --- Global concurrency limiter for Claude SDK queries ---
 const MAX_CONCURRENT_CLAUDE = 20;
 let runningClaudeCount = 0;
 const claudeWaitQueue = []; // Array of { resolve } callbacks waiting for a slot
@@ -92,19 +101,19 @@ function loadState() {
         for (const [chatId, dir] of Object.entries(data.projectDirs)) {
           if (!fs.existsSync(dir)) continue;
           projectDirs.set(chatId, dir);
-          logger.info(`Restored project mapping: ${chatId} → ${dir}`);
+          logger.info(`Restored project mapping: ${chatId} \u2192 ${dir}`);
         }
       }
       if (data.sessions) {
         for (const [chatId, sessionId] of Object.entries(data.sessions)) {
           sessions.set(chatId, sessionId);
-          logger.info(`Restored session: ${chatId} → ${sessionId}`);
+          logger.info(`Restored session: ${chatId} \u2192 ${sessionId}`);
         }
       }
       if (data.chatModels) {
         for (const [chatId, model] of Object.entries(data.chatModels)) {
           chatModels.set(chatId, model);
-          logger.info(`Restored model: ${chatId} → ${model}`);
+          logger.info(`Restored model: ${chatId} \u2192 ${model}`);
         }
       }
       if (data.tokenCounters) {
@@ -141,7 +150,7 @@ function loadState() {
         const sessionId = sessions.get(key);
         sessions.delete(key);
         sessions.set(`${key}:general`, sessionId);
-        logger.info(`Migrated session key: ${key} → ${key}:general`);
+        logger.info(`Migrated session key: ${key} \u2192 ${key}:general`);
       }
       if (data.pendingTasks) {
         for (const [chatId, task] of Object.entries(data.pendingTasks)) {
@@ -236,58 +245,88 @@ You are a personal AI assistant running on WhatsApp. The user controls you from 
 
 IDENTITY:
 - You are NOT Claude. You are NOT made by Anthropic. Never mention Claude or Anthropic.
-- You are a personal AI assistant. You don't have a specific brand name — just a helpful assistant.
-- If asked "who are you?" or "what are you?", say something like: "I'm your personal AI assistant — here to help you with whatever you need. Think of me as a teammate who never sleeps."
+- You are a personal AI assistant. You don't have a specific brand name \u2014 just a helpful assistant.
+- If asked "who are you?" or "what are you?", say something like: "I'm your personal AI assistant \u2014 here to help you with whatever you need. Think of me as a teammate who never sleeps."
 - Keep it casual, friendly, and confident. You exist to help them tame their chaos.
 
 MEMORY & CONTINUITY:
 - After every significant task, decision, or discussion, update the project's CLAUDE.md file with what was done, key decisions made, and current state.
 - If CLAUDE.md doesn't exist in the project directory, create it with a clear structure.
-- Keep CLAUDE.md concise but complete — it's the memory that persists across sessions.
+- Keep CLAUDE.md concise but complete \u2014 it's the memory that persists across sessions.
 - Structure CLAUDE.md with sections like: ## Project Overview, ## Architecture, ## Current State, ## Key Decisions, ## Recent Changes, ## TODO
 - When resuming work, always read CLAUDE.md first to understand where we left off.
 - Save reusable patterns, gotchas, and lessons learned so future sessions don't repeat mistakes.
 
 WEB SEARCH:
 - You have access to WebSearch and WebFetch tools. USE THEM.
-- When the user asks about current events, news, recent happenings, or ANYTHING beyond your knowledge cutoff — ALWAYS search the web first before responding.
+- When the user asks about current events, news, recent happenings, or ANYTHING beyond your knowledge cutoff \u2014 ALWAYS search the web first before responding.
 - NEVER say "my knowledge cuts off at..." without first attempting a web search.
-- For news, current events, stock prices, weather, sports scores, or any time-sensitive information — search first, then answer.
+- For news, current events, stock prices, weather, sports scores, or any time-sensitive information \u2014 search first, then answer.
 - Use WebFetch to read specific URLs the user shares or that you find via search.
 
-FORMATTING (CRITICAL — you're on WhatsApp, not a terminal):
+FORMATTING (CRITICAL \u2014 you're on WhatsApp, not a terminal):
 - Bold: *text* (NOT **text**)
 - Italic: _text_ (NOT *text* with single asterisks)
 - Strikethrough: ~text~
-- Monospace: \`text\` (single backticks only — triple backticks show as literal \`\`\`)
+- Monospace: \`text\` (single backticks only \u2014 triple backticks show as literal \`\`\`)
 - NO markdown headers (##, ###). Use *Bold Title* on its own line instead.
 - NO markdown links [text](url). Just paste the URL directly.
-- NO bullet points with - or *. Use • (bullet character) or numbered lists.
+- NO bullet points with - or *. Use \u2022 (bullet character) or numbered lists.
 - Keep messages concise. No walls of text.
 
 WORKING STYLE:
-- Act autonomously. Don't ask for permission — just do the work.
+- Act autonomously. Don't ask for permission \u2014 just do the work.
 - Only ask before deleting/removing things.
 - When you complete a task, briefly confirm what was done.
-- Keep responses concise — this is WhatsApp, not a terminal.
+- Keep responses concise \u2014 this is WhatsApp, not a terminal.
+
+SCHEDULING & REMINDERS:
+When a user asks to be reminded of something, get notified at a certain time, or set up a recurring task, include a special tag in your response. The system processes this tag automatically \u2014 the user will NOT see it.
+
+For simple reminders (just sends the message text, no AI processing):
+<<REMIND|time_expression|reminder message>>
+
+For tasks that need AI to do something (runs through AI each time):
+<<SCHEDULE|time_expression|task prompt>>
+
+Time expressions you can use:
+\u2022 "daily HH:MM" \u2014 every day at that time (24h format), e.g. "daily 18:00"
+\u2022 "daily H:MMam/pm" \u2014 e.g. "daily 6:00pm"
+\u2022 "weekdays HH:MM" \u2014 Monday through Friday
+\u2022 "weekends HH:MM" \u2014 Saturday and Sunday
+\u2022 "every monday HH:MM" \u2014 a specific day of week (full name: monday, tuesday, etc.)
+\u2022 "every Nh" or "every Nm" \u2014 interval (e.g. "every 2h", "every 30m")
+\u2022 Raw cron for advanced cases: "0 18 * * *"
+
+Rules:
+\u2022 Always place the tag at the END of your message, on its own line.
+\u2022 Always confirm what you set up in your natural language response BEFORE the tag.
+\u2022 Use REMIND for simple reminders/notifications. Use SCHEDULE for tasks that need AI work (e.g. "check my emails", "summarize the news").
+\u2022 The reminder/task prompt should be the actual message or instruction \u2014 not a description of the schedule.
+
+Examples:
+User: "remind me every day at 6pm to exercise"
+\u2192 "Done! I'll remind you every day at 6:00 PM to exercise.
+<<REMIND|daily 18:00|Time to exercise! Stay consistent with your fitness goals \ud83d\udcaa>>"
+
+User: "every weekday at 9am, check my emails and give me a summary"
+\u2192 "All set! I'll check and summarize your emails every weekday morning at 9:00 AM.
+<<SCHEDULE|weekdays 9:00|Check the user's emails and provide a brief summary of important messages>>"
+
+User: "remind me every monday at 10am to submit my timesheet"
+\u2192 "Got it! Weekly reminder set for Monday at 10:00 AM.
+<<REMIND|every monday 10:00|Reminder: Submit your timesheet! Don't forget to log all your hours for last week.>>"
 
 ${SECURITY_SYSTEM_PROMPT}
 `;
 
 async function runClaude(prompt, chatId, sandboxKey, _isRetry = false, opts = {}) {
-  // Wait for a concurrency slot before spawning
+  const { query: sdkQuery } = await getSDK();
+
+  // Wait for a concurrency slot
   await acquireClaudeSlot();
 
   const model = getChatModel(chatId) || config.claudeModel;
-  const args = [
-    '-p',
-    '--model', model,
-    '--effort', 'medium',
-    '--dangerously-skip-permissions',
-    '--output-format', 'json',
-  ];
-
-  const useBwrap = config.sandboxEnabled && sandbox.isBwrapAvailable();
 
   // Agent-aware session key: chatId:agentId
   const agentId = activeAgents.get(chatId) || agents.getDefaultAgentId();
@@ -297,35 +336,21 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false, opts = {}
   if (config.enableSessions) {
     sessionId = sessions.get(sessionKey) || null;
   }
-
   const hasSession = !!sessionId;
 
-  // Resume existing session
-  if (hasSession) {
-    args.push('--resume', sessionId);
-  }
-
-  // Build MCP config — Google (per-user OAuth) + Resend (per-user API key)
+  // Build MCP config — all integrations use host paths (no bwrap)
   let googlePrompt = '';
-  let mcpConfig = null;
-
-  // Determine paths based on whether we're in a sandbox (bwrap)
-  const sandboxed = useBwrap;
-  const nodePath = useBwrap ? '/opt/node/bin/node' : config.nodeBinaryPath;
+  const mcpServers = {};
+  const nodePath = config.nodeBinaryPath;
   const apiUrl = `http://localhost:${config.httpPort}`;
 
   // Resend MCP — per-user API key
   const resendApiKey = resendAuth.resolveApiKey(chatId);
   if (resendApiKey) {
-    const resendMcpPath = sandboxed ? '/opt/mcp/resend-mcp-server.mjs' : path.resolve(config.resendMcpPath);
-    mcpConfig = {
-      mcpServers: {
-        resend: {
-          command: nodePath,
-          args: [resendMcpPath],
-          env: { RESEND_API_KEY: resendApiKey },
-        },
-      },
+    mcpServers.resend = {
+      command: nodePath,
+      args: [path.resolve(config.resendMcpPath)],
+      env: { RESEND_API_KEY: resendApiKey },
     };
   }
 
@@ -334,29 +359,27 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false, opts = {}
     const googleStatus = googleAuth.getStatus(chatId);
 
     if (googleStatus.connected) {
-      const mcpPath = sandboxed ? '/opt/mcp/google-mcp-server.js' : path.resolve(config.mcpServerPath);
-
-      if (!mcpConfig) mcpConfig = { mcpServers: {} };
-      mcpConfig.mcpServers.google = {
+      mcpServers.google = {
         command: nodePath,
-        args: [mcpPath],
+        args: [path.resolve(config.mcpServerPath)],
         env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
       };
 
       googlePrompt = `
-GOOGLE INTEGRATION: Connected as ${googleStatus.email}. You have MCP tools for Gmail, Drive, Sheets, and Docs — use them directly instead of curl.
+GOOGLE INTEGRATION: Connected as ${googleStatus.email}. You have MCP tools for Gmail, Drive, Sheets, and Docs \u2014 use them directly instead of curl.
 GUIDELINES:
 - When the user asks to send an email, compose and send directly. Don't ask for confirmation unless ambiguous.
 - Gmail "query" param accepts Gmail search syntax (e.g. "from:user@example.com", "is:unread", "subject:invoice").
 - Drive "query" param accepts Drive search syntax (e.g. "name contains 'report'", "mimeType='application/pdf'").
 - For Sheets, "range" uses A1 notation (e.g. "Sheet1!A1:D10"). "values" is a 2D array of strings.
-- NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual Gmail configuration. You already have a built-in integration — use it.
-FILE OUTPUT: When asked to create documents, reports, PDFs, images, or any files — ALWAYS save them locally in the current working directory (NOT to Google Drive). The bot will automatically deliver files to the user via WhatsApp. Only use drive_upload when the user explicitly asks to upload to Drive.
+- NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual Gmail configuration. You already have a built-in integration \u2014 use it.
+FILE OUTPUT: When asked to create documents, reports, PDFs, images, or any files \u2014 ALWAYS save them locally in the current working directory (NOT to Google Drive). The bot will automatically deliver files to the user via WhatsApp. Only use drive_upload when the user explicitly asks to upload to Drive.
+INVOICE PDF TOOL: To generate invoice PDFs, run: node /opt/tools/invoice-pdf.js '<JSON>' where JSON has: invoiceNumber, date, dueDate, from:{name,email}, to:{name,email}, items:[{description,quantity,rate,amount}], subtotal, tax, total. The PDF is saved in the current directory and auto-delivered to the user. ALWAYS use this tool for invoices \u2014 never pretend to create a PDF without running this command.
 `;
     } else {
       googlePrompt = `
 GOOGLE INTEGRATION (NOT YET CONNECTED):
-If the user asks about email, Gmail, Google Drive, Google Docs, or Google Sheets — tell them to type /gmail login to connect their Google account.
+If the user asks about email, Gmail, Google Drive, Google Docs, or Google Sheets \u2014 tell them to type /gmail login to connect their Google account.
 NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual configuration. The built-in integration handles everything automatically.
 `;
     }
@@ -368,111 +391,108 @@ NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual co
     const outlookStatus = microsoftAuth.getStatus(chatId);
 
     if (outlookStatus.connected) {
-      const outlookMcpPath = sandboxed ? '/opt/mcp/outlook-mcp-server.js' : path.resolve(config.outlookMcpServerPath);
-
-      if (!mcpConfig) mcpConfig = { mcpServers: {} };
-      mcpConfig.mcpServers.outlook = {
+      mcpServers.outlook = {
         command: nodePath,
-        args: [outlookMcpPath],
+        args: [path.resolve(config.outlookMcpServerPath)],
         env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
       };
 
       outlookPrompt = `
-OUTLOOK INTEGRATION: Connected as ${outlookStatus.email}. You have MCP tools for Outlook Mail — use them directly.
+OUTLOOK INTEGRATION: Connected as ${outlookStatus.email}. You have MCP tools for Outlook Mail \u2014 use them directly.
 GUIDELINES:
 - When the user asks to send an email via Outlook, compose and send directly. Don't ask for confirmation unless ambiguous.
 - Use outlook_inbox with "query" for searching (Microsoft search syntax, e.g. "from:user@example.com", "subject:invoice").
 - Use outlook_reply/outlook_forward for replies and forwards.
 - Use outlook_folders to list available folders and outlook_move to organize emails.
-- NEVER suggest app passwords, SMTP setup, or manual configuration. You already have a built-in integration — use it.
+- NEVER suggest app passwords, SMTP setup, or manual configuration. You already have a built-in integration \u2014 use it.
 `;
     } else {
       outlookPrompt = `
 OUTLOOK INTEGRATION (NOT YET CONNECTED):
-If the user asks about Outlook email — tell them to type /outlook login to connect their Microsoft account.
+If the user asks about Outlook email \u2014 tell them to type /outlook login to connect their Microsoft account.
 NEVER suggest app passwords, SMTP setup, or any manual configuration. The built-in integration handles everything automatically.
 `;
     }
   }
 
+  // Shopify MCP — only when user has connected their Shopify store
+  let shopifyPrompt = '';
+  if (shopifyAuth.isConfigured()) {
+    const shopifyStatus = shopifyAuth.getStatus(chatId);
+
+    if (shopifyStatus.connected) {
+      mcpServers.shopify = {
+        command: nodePath,
+        args: [path.resolve(config.shopifyMcpPath)],
+        env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
+      };
+
+      shopifyPrompt = `
+SHOPIFY INTEGRATION: Connected to store "${shopifyStatus.shopName || shopifyStatus.shop}". You have MCP tools to manage their Shopify store — use them directly.
+GUIDELINES:
+- Products: List, create, update, delete products. Include variants (sizes/colors) when creating.
+- Orders: List, view details, fulfill (with tracking), cancel orders.
+- Customers: Search and view customer details.
+- Inventory: Set stock quantities at locations. Use shopify_list_locations first to get location IDs.
+- Discounts: Create percentage or fixed-amount discount codes.
+- Draft Orders: Create custom invoices/manual orders.
+- When creating products, default status to "active" unless told otherwise.
+- When fulfilling orders, always ask for tracking number if not provided.
+- For inventory updates, you need the inventoryItemId from the product variant and a locationId.
+`;
+    } else {
+      shopifyPrompt = `
+SHOPIFY INTEGRATION (NOT YET CONNECTED):
+If the user asks about their Shopify store, products, orders, or anything e-commerce related — tell them to type /shopify login <shop> to connect their store.
+Example: /shopify login mystore.myshopify.com
+`;
+    }
+  }
+
   // Playwright MCP — only for tasks that genuinely need interactive browser automation
-  // (NOT for general web search, fetching URLs, or reading websites — WebSearch/WebFetch handle those)
   const NEEDS_BROWSER = /\b(take\s+a?\s*screenshot|screenshot\s+of|fill\s+(out\s+)?(the\s+)?form|submit\s+(the\s+)?form|log\s*in\s+to|sign\s*in\s+to|click\s+(the\s+|on\s+)?button|automate\s+(the\s+)?(website|page|site|browser)|browser\s+automation|interact\s+with\s+(the\s+)?(page|site|website))\b/i;
   if (NEEDS_BROWSER.test(prompt) || opts.useBrowser) {
-    const playwrightMcpPath = sandboxed
-      ? '/opt/mcp/node_modules/@playwright/mcp/cli.js'
-      : path.resolve(config.playwrightMcpPath);
-    const playwrightBrowsersPath = sandboxed
-      ? '/opt/playwright-browsers'
-      : config.playwrightBrowsersPath;
-
-    if (!mcpConfig) mcpConfig = { mcpServers: {} };
-    mcpConfig.mcpServers.playwright = {
+    mcpServers.playwright = {
       command: nodePath,
-      args: [playwrightMcpPath, '--headless'],
+      args: [path.resolve(config.playwrightMcpPath), '--headless'],
       env: {
-        PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsersPath,
-        NODE_PATH: sandboxed ? '/opt/mcp/node_modules' : '',
+        PLAYWRIGHT_BROWSERS_PATH: config.playwrightBrowsersPath,
       },
     };
   }
 
-  // Trading MCP — always active when using paper-trader agent (no login needed)
+  // Trading MCP — always active when using paper-trader agent
   if (agentId === 'paper-trader') {
-    const tradingMcpPath = sandboxed ? '/opt/mcp/trading-mcp-server.js' : path.resolve(config.tradingMcpPath);
-
-    // Portfolio file lives in the agent workspace
     const { base } = sandbox.ensureSandboxDirs(sandboxKey || chatId);
     const agentWorkspace = agents.ensureAgentWorkspace(base, 'paper-trader');
-    const portfolioPath = sandboxed
-      ? '/workspace/portfolio.json'
-      : path.join(agentWorkspace, 'portfolio.json');
-
-    if (!mcpConfig) mcpConfig = { mcpServers: {} };
-    mcpConfig.mcpServers.trading = {
+    mcpServers.trading = {
       command: nodePath,
-      args: [tradingMcpPath],
-      env: { PORTFOLIO_PATH: portfolioPath },
+      args: [path.resolve(config.tradingMcpPath)],
+      env: { PORTFOLIO_PATH: path.join(agentWorkspace, 'portfolio.json') },
     };
   }
 
   // Job Hunter MCP — always active when using job-hunter agent
   if (agentId === 'job-hunter') {
-    const jobHunterMcpPath = sandboxed ? '/opt/mcp/job-hunter-mcp-server.js' : path.resolve(config.jobHunterMcpPath);
-
-    // Tracker file lives in the agent workspace
     const { base } = sandbox.ensureSandboxDirs(sandboxKey || chatId);
     const agentWorkspace = agents.ensureAgentWorkspace(base, 'job-hunter');
-    const trackerPath = sandboxed
-      ? '/workspace/tracker.json'
-      : path.join(agentWorkspace, 'tracker.json');
-
-    if (!mcpConfig) mcpConfig = { mcpServers: {} };
-    mcpConfig.mcpServers.jobhunter = {
+    mcpServers.jobhunter = {
       command: nodePath,
-      args: [jobHunterMcpPath],
-      env: { TRACKER_PATH: trackerPath, CHAT_ID: chatId, BOT_API_URL: apiUrl },
+      args: [path.resolve(config.jobHunterMcpPath)],
+      env: { TRACKER_PATH: path.join(agentWorkspace, 'tracker.json'), CHAT_ID: chatId, BOT_API_URL: apiUrl },
     };
   }
 
   // Real Estate MCP — always active when using real-estate agent
   if (agentId === 'real-estate') {
-    const realestateMcpPath = sandboxed ? '/opt/mcp/realestate-mcp-server.js' : path.resolve(config.realestateMcpPath);
-
-    // Data file lives in the agent workspace
     const { base } = sandbox.ensureSandboxDirs(sandboxKey || chatId);
     const agentWorkspace = agents.ensureAgentWorkspace(base, 'real-estate');
-    const dataPath = sandboxed
-      ? '/workspace/realestate-data.json'
-      : path.join(agentWorkspace, 'realestate-data.json');
-
-    if (!mcpConfig) mcpConfig = { mcpServers: {} };
-    mcpConfig.mcpServers.realestate = {
+    mcpServers.realestate = {
       command: nodePath,
-      args: [realestateMcpPath],
+      args: [path.resolve(config.realestateMcpPath)],
       env: {
-        DATA_PATH: dataPath,
-        BOT_API_URL: `http://localhost:${config.httpPort}`,
+        DATA_PATH: path.join(agentWorkspace, 'realestate-data.json'),
+        BOT_API_URL: apiUrl,
         CHAT_ID: chatId,
         FUB_API_KEY: config.fubApiKey || '',
         MLS_API_URL: config.mlsApiUrl || '',
@@ -485,11 +505,11 @@ NEVER suggest app passwords, SMTP setup, or any manual configuration. The built-
     };
   }
 
-  // Real Estate prompt — tell Claude about real estate tools when active
+  // Real Estate prompt
   let realestatePrompt = '';
-  if (mcpConfig && mcpConfig.mcpServers && mcpConfig.mcpServers.realestate) {
+  if (mcpServers.realestate) {
     realestatePrompt = `
-REAL ESTATE CRM: You have 57 MCP tools for managing a complete real estate business. ALWAYS use these tools — never fabricate data. All data persists across sessions.
+REAL ESTATE CRM: You have 57 MCP tools for managing a complete real estate business. ALWAYS use these tools \u2014 never fabricate data. All data persists across sessions.
 
 LEAD MANAGEMENT: lead_add, lead_list, lead_view, lead_update, lead_delete, lead_qualify, lead_search, lead_conversation_log, lead_bulk_action, crm_sync, lead_consent_track
 PROPERTIES: property_add, property_list, property_update, property_match, property_compare, mls_search, neighborhood_data
@@ -504,53 +524,53 @@ TRANSACTIONS: transaction_create, transaction_status, transaction_update, transa
 DASHBOARD: pipeline_stats
 
 KEY WORKFLOWS:
-- New lead → lead_add → lead_qualify → ask BANT questions → property_match → schedule showing
-- Marketing → listing_generate → listing_campaign → listing_publish (social/email/whatsapp)
-- Lead gen → leadgen_buyer_campaign or leadgen_seller_valuation → publish → track with leadgen_stats
-- Valuation → valuation_estimate → valuation_to_lead → nurture_enroll
-- Transaction → transaction_create → track deadlines → document_checklist → transaction_update (closed)
+- New lead \u2192 lead_add \u2192 lead_qualify \u2192 ask BANT questions \u2192 property_match \u2192 schedule showing
+- Marketing \u2192 listing_generate \u2192 listing_campaign \u2192 listing_publish (social/email/whatsapp)
+- Lead gen \u2192 leadgen_buyer_campaign or leadgen_seller_valuation \u2192 publish \u2192 track with leadgen_stats
+- Valuation \u2192 valuation_estimate \u2192 valuation_to_lead \u2192 nurture_enroll
+- Transaction \u2192 transaction_create \u2192 track deadlines \u2192 document_checklist \u2192 transaction_update (closed)
 - Start sessions by checking pipeline_stats, followup_list, nurture_status, and deadline_reminder.
 `;
   }
 
-  // Trading prompt — tell Claude about paper trading tools when active
+  // Trading prompt
   let tradingPrompt = '';
-  if (mcpConfig && mcpConfig.mcpServers && mcpConfig.mcpServers.trading) {
+  if (mcpServers.trading) {
     tradingPrompt = `
-PAPER TRADING: You have MCP tools for paper trading with real market data. Use trade_buy, trade_sell, portfolio_view, market_quote, market_search, options_chain, trade_history, and portfolio_reset. ALWAYS use these tools — never fabricate prices. The portfolio persists across sessions.
+PAPER TRADING: You have MCP tools for paper trading with real market data. Use trade_buy, trade_sell, portfolio_view, market_quote, market_search, options_chain, trade_history, and portfolio_reset. ALWAYS use these tools \u2014 never fabricate prices. The portfolio persists across sessions.
 `;
   }
 
-  // Job Hunter prompt — tell Claude about job hunting tools when active
+  // Job Hunter prompt
   let jobHunterPrompt = '';
-  if (mcpConfig && mcpConfig.mcpServers && mcpConfig.mcpServers.jobhunter) {
+  if (mcpServers.jobhunter) {
     jobHunterPrompt = `
-JOB HUNTER: You have MCP tools for job searching and application tracking. Use job_search, job_details, company_info, tracker_add, tracker_list, tracker_update, and tracker_stats. ALWAYS use job_search for finding jobs — never fabricate listings. When the user mentions applying somewhere, use tracker_add. The tracker persists across sessions.
+JOB HUNTER: You have MCP tools for job searching and application tracking. Use job_search, job_details, company_info, tracker_add, tracker_list, tracker_update, and tracker_stats. ALWAYS use job_search for finding jobs \u2014 never fabricate listings. When the user mentions applying somewhere, use tracker_add. The tracker persists across sessions.
 `;
   }
 
-  // Playwright prompt — tell Claude it has browser tools when active
+  // Playwright prompt
   let playwrightPrompt = '';
-  if (mcpConfig && mcpConfig.mcpServers && mcpConfig.mcpServers.playwright) {
+  if (mcpServers.playwright) {
     playwrightPrompt = `
-BROWSER AUTOMATION: You have Playwright MCP tools available RIGHT NOW. Use them to take screenshots, navigate pages, click elements, fill forms, etc. Do NOT say you can't take screenshots — you CAN. Use the playwright tools.
+BROWSER AUTOMATION: You have Playwright MCP tools available RIGHT NOW. Use them to take screenshots, navigate pages, click elements, fill forms, etc. Do NOT say you can't take screenshots \u2014 you CAN. Use the playwright tools.
 `;
   }
 
-  // Resend prompt — tell Claude about email tools when available
+  // Resend prompt
   let resendPrompt = '';
   if (resendApiKey) {
     resendPrompt = `
 RESEND EMAIL: You have MCP tools from Resend for sending emails, managing contacts, domains, and more. Use the Resend tools (e.g. send-email) when the user asks to send emails via Resend.
-COMMANDS: /resend status — check connection, /resend disconnect — remove API key and disconnect.
+COMMANDS: /resend status \u2014 check connection, /resend disconnect \u2014 remove API key and disconnect.
 IMPORTANT: Never create or delete API keys without explicit user confirmation. Never expose the user's API key in your response.
 `;
   } else {
     resendPrompt = `
 RESEND EMAIL (NOT YET CONNECTED):
-If the user asks about sending emails via Resend — tell them to type /resend to set up their Resend API key.
-COMMANDS: /resend — setup guide, /resend setup <api-key> — connect account, /resend disconnect — remove API key.
-Do NOT attempt to use Resend tools — they are not available until the user connects their account.
+If the user asks about sending emails via Resend \u2014 tell them to type /resend to set up their Resend API key.
+COMMANDS: /resend \u2014 setup guide, /resend setup <api-key> \u2014 connect account, /resend disconnect \u2014 remove API key.
+Do NOT attempt to use Resend tools \u2014 they are not available until the user connects their account.
 `;
   }
 
@@ -559,17 +579,14 @@ Do NOT attempt to use Resend tools — they are not available until the user con
   if (githubAuth.isConfigured()) {
     const ghStatus = githubAuth.getStatus(chatId);
     if (ghStatus.connected) {
-      const githubMcpPath = sandboxed ? '/opt/mcp/github-mcp-server.js' : path.resolve(config.githubMcpServerPath);
-
-      if (!mcpConfig) mcpConfig = { mcpServers: {} };
-      mcpConfig.mcpServers.github = {
+      mcpServers.github = {
         command: nodePath,
-        args: [githubMcpPath],
+        args: [path.resolve(config.githubMcpServerPath)],
         env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
       };
 
       githubPrompt = `
-GITHUB INTEGRATION: Connected as ${ghStatus.account}. You have MCP tools for GitHub — use them to list repos, read/write files, create branches, open PRs, manage issues, and search code.
+GITHUB INTEGRATION: Connected as ${ghStatus.account}. You have MCP tools for GitHub \u2014 use them to list repos, read/write files, create branches, open PRs, manage issues, and search code.
 GUIDELINES:
 - Use github_list_repos to see available repos.
 - Use github_get_file / github_list_files to browse repo contents.
@@ -579,14 +596,14 @@ GUIDELINES:
 - Use github_list_issues / github_create_issue to manage issues.
 - Use github_search_code to find code across repos.
 - The "repo" parameter always uses "owner/repo" format (e.g. "octocat/hello-world").
-COMMANDS: /repos — list connected repos, /repo <name> — clone and set active repo, /github disconnect — remove connection.
+COMMANDS: /repos \u2014 list connected repos, /repo <name> \u2014 clone and set active repo, /github disconnect \u2014 remove connection.
 `;
     } else {
       githubPrompt = `
 GITHUB INTEGRATION (NOT YET CONNECTED):
-If the user asks about working with GitHub repos, coding on their repos, committing code, or managing repositories — tell them to type /github to connect their GitHub account. They'll choose which repos to give access to.
-CAPABILITIES once connected: Browse repo files, create/update files, create branches, open PRs, manage issues, search code — all via MCP tools.
-COMMANDS: /github — connect GitHub account, /repos — list repos, /repo <name> — set active repo.
+If the user asks about working with GitHub repos, coding on their repos, committing code, or managing repositories \u2014 tell them to type /github to connect their GitHub account. They'll choose which repos to give access to.
+CAPABILITIES once connected: Browse repo files, create/update files, create branches, open PRs, manage issues, search code \u2014 all via MCP tools.
+COMMANDS: /github \u2014 connect GitHub account, /repos \u2014 list repos, /repo <name> \u2014 set active repo.
 `;
     }
   }
@@ -594,29 +611,26 @@ COMMANDS: /github — connect GitHub account, /repos — list repos, /repo <name
   // FreeTools MCP — social media publishing (always active, auto-provisions account)
   let freetoolsPrompt = '';
   try {
-    const ftStatus = freetoolsAuth.getStatus(chatId);
-    const freetoolsMcpPath = sandboxed ? '/opt/mcp/freetools-mcp-server.js' : path.resolve(config.freetoolsMcpPath);
-
-    if (!mcpConfig) mcpConfig = { mcpServers: {} };
-    mcpConfig.mcpServers.freetools = {
+    freetoolsAuth.getStatus(chatId);
+    mcpServers.freetools = {
       command: nodePath,
-      args: [freetoolsMcpPath],
+      args: [path.resolve(config.freetoolsMcpPath)],
       env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
     };
 
     freetoolsPrompt = `
 SOCIAL PUBLISHING: You have MCP tools to post and manage content on social media (X/Twitter, LinkedIn, Instagram) via freetools.us.
-WORKFLOW — always follow this order:
-1. ALWAYS call social_list_accounts FIRST — this is the live source of truth. Never assume from memory or conversation history.
+WORKFLOW \u2014 always follow this order:
+1. ALWAYS call social_list_accounts FIRST \u2014 this is the live source of truth. Never assume from memory or conversation history.
 2. If accounts are returned, use their IDs with social_publish_now or social_schedule_post.
 3. Only if social_list_accounts returns empty, use social_get_connect_url and send the OAuth link to the user.
 CRITICAL RULES:
-- NEVER tell the user to connect if you haven't called social_list_accounts first — they may already be connected.
-- NEVER fabricate account IDs — always get them from social_list_accounts.
-- When asked to post to LinkedIn/X/Instagram — call social_list_accounts immediately, then publish.
+- NEVER tell the user to connect if you haven't called social_list_accounts first \u2014 they may already be connected.
+- NEVER fabricate account IDs \u2014 always get them from social_list_accounts.
+- When asked to post to LinkedIn/X/Instagram \u2014 call social_list_accounts immediately, then publish.
 - Supported platforms: TWITTER, LINKEDIN, INSTAGRAM.
-MEDIA ATTACHMENTS: To attach images or videos to social posts, use the "filePath" parameter with the local filename (e.g. filePath: "video.mp4"). The bot automatically makes it publicly accessible — do NOT ask the user for a public URL or suggest uploading to Drive. Also set mediaType to "IMAGE" or "VIDEO" accordingly.
-COMMANDS: /social — show connected accounts, /social connect <platform> — connect account, /social posts — list posts.
+MEDIA ATTACHMENTS: To attach images or videos to social posts, use the "filePath" parameter with the local filename (e.g. filePath: "video.mp4"). The bot automatically makes it publicly accessible \u2014 do NOT ask the user for a public URL or suggest uploading to Drive. Also set mediaType to "IMAGE" or "VIDEO" accordingly.
+COMMANDS: /social \u2014 show connected accounts, /social connect <platform> \u2014 connect account, /social posts \u2014 list posts.
 `;
   } catch (e) {
     logger.warn(`FreeTools MCP setup failed: ${e.message}`);
@@ -626,11 +640,11 @@ COMMANDS: /social — show connected accounts, /social connect <platform> — co
   const projectDir = getProjectDir(chatId);
   if (projectDir) {
     try {
-      const gitDir = require('path').join(projectDir, '.git');
+      const gitDir = path.join(projectDir, '.git');
       if (fs.existsSync(gitDir)) {
         githubPrompt += `
 ACTIVE REPO: You are working in a cloned GitHub repository at the current directory. You can edit files, then commit and push.
-WORKFLOW: Make changes → git add <files> → git commit -m "descriptive message" → git push
+WORKFLOW: Make changes \u2192 git add <files> \u2192 git commit -m "descriptive message" \u2192 git push
 IMPORTANT: Always check git status before starting. Use descriptive commit messages. The push will trigger CI/CD deployment if configured.
 NEVER force push or rewrite history. Only push to the default branch.
 `;
@@ -638,42 +652,37 @@ NEVER force push or rewrite history. Only push to the default branch.
     } catch {}
   }
 
-  // For new sessions, prepend the memory system prompt + integration context
+  // Build the integration context
+  const integrationContext = realestatePrompt + tradingPrompt + jobHunterPrompt + playwrightPrompt + resendPrompt + googlePrompt + outlookPrompt + shopifyPrompt + githubPrompt + freetoolsPrompt;
+
+  // For resumed sessions, prepend integration context to prompt
+  // For new sessions, use SDK's systemPrompt option (proper system prompt mechanism)
   const fullPrompt = hasSession
-    ? (realestatePrompt + tradingPrompt + jobHunterPrompt + playwrightPrompt + resendPrompt + googlePrompt + outlookPrompt + githubPrompt + freetoolsPrompt + prompt)
-    : MEMORY_SYSTEM_PROMPT + realestatePrompt + tradingPrompt + jobHunterPrompt + playwrightPrompt + resendPrompt + googlePrompt + outlookPrompt + githubPrompt + freetoolsPrompt + prompt;
+    ? (integrationContext + prompt)
+    : prompt;
 
-  // Add MCP config — must be after ALL mcpServers are registered (github, freetools, etc.)
-  if (mcpConfig) {
-    args.push('--mcp-config', JSON.stringify(mcpConfig));
-  }
+  const systemPrompt = hasSession
+    ? undefined
+    : (MEMORY_SYSTEM_PROMPT + integrationContext);
 
-  // When --mcp-config is used, Claude CLI silently produces 0 bytes if the prompt
-  // is passed as a CLI arg. The workaround: pipe the prompt via shell
-  // (sh -c 'printf "%s" "PROMPT" | claude -p ...') inside the container.
-  const pipePrompt = !!mcpConfig;
-  args.push(pipePrompt ? '__PIPE_PROMPT__' : fullPrompt);
-
-  // Layer 2: whitelist-only env — strips all API keys, tokens, and secrets
-  const spawnEnv = buildSafeEnv();
-
-  // Use user-set project dir, or agent-specific workspace (never fall back to $HOME)
+  // Use user-set project dir, or agent-specific workspace
   let cwd = getProjectDir(chatId);
   if (!cwd) {
     const { base } = sandbox.ensureSandboxDirs(sandboxKey || chatId);
     cwd = agents.ensureAgentWorkspace(base, agentId);
   }
+
   // Refresh GitHub credentials if working in a git repo
   if (cwd) {
     try {
       const gitDir = path.join(cwd, '.git');
       const credPath = path.join(cwd, '.git-credentials');
       if (fs.existsSync(gitDir) && fs.existsSync(credPath)) {
-        const githubAuth = require('./github-auth');
-        if (githubAuth.isConfigured()) {
-          const ghStatus = githubAuth.getStatus(chatId);
+        const ghAuth = require('./github-auth');
+        if (ghAuth.isConfigured()) {
+          const ghStatus = ghAuth.getStatus(chatId);
           if (ghStatus.connected) {
-            const { token } = await githubAuth.generateInstallationToken(chatId);
+            const { token } = await ghAuth.generateInstallationToken(chatId);
             fs.writeFileSync(credPath, `https://x-access-token:${token}@github.com\n`, { mode: 0o600 });
           }
         }
@@ -683,9 +692,8 @@ NEVER force push or rewrite history. Only push to the default branch.
     }
   }
 
-  logger.info(`Spawning claude [${runningClaudeCount}/${MAX_CONCURRENT_CLAUDE}] in ${useBwrap ? 'bwrap' : cwd}: ${args.slice(0, -1).join(' ')} "<prompt>"`);
-
   const sbKey = sandboxKey || chatId;
+  const promptPreview = prompt.slice(0, 80).replace(/\n/g, ' ');
 
   // Log user message to conversation history (skip on retry to avoid duplicates)
   if (!_isRetry) {
@@ -699,205 +707,201 @@ NEVER force push or rewrite history. Only push to the default branch.
     sessionId,
     project: cwd,
     promptPreview: prompt.slice(0, 200),
-    sandbox: useBwrap ? 'bwrap' : 'none',
+    sandbox: 'sdk',
   });
 
-  let proc;
-  if (useBwrap) {
-    logger.info(`Using bwrap sandbox for ${sbKey}`);
-    proc = sandbox.spawnInBwrap(sbKey, args, spawnEnv, pipePrompt ? fullPrompt : null);
-  } else {
-    // No isolation available — bare host spawn (fallback)
-    logger.warn('No sandbox available (bwrap) — running Claude without filesystem isolation');
-    if (pipePrompt) {
-      const hostArgs = args.filter(a => a !== '__PIPE_PROMPT__');
-      proc = spawn(config.claudePath, hostArgs, { stdio: ['pipe', 'pipe', 'pipe'], cwd, env: spawnEnv });
-      proc.stdin.write(fullPrompt);
-      proc.stdin.end();
-    } else {
-      proc = spawn(config.claudePath, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd, env: spawnEnv });
-    }
+  logger.info(`SDK query [${runningClaudeCount}/${MAX_CONCURRENT_CLAUDE}] cwd=${cwd} model=${model} session=${sessionId || 'new'} agent=${agentId}`);
+
+  // Set up abort controller for /stop support
+  const abortController = new AbortController();
+
+  // Build SDK options
+  const sdkOptions = {
+    model,
+    cwd,
+    permissionMode: 'bypassPermissions',
+    abortController,
+  };
+
+  if (systemPrompt) {
+    sdkOptions.systemPrompt = systemPrompt;
   }
 
-  return new Promise((resolve, reject) => {
-    // Track active process so it can be killed by /stop
-    const promptPreview = prompt.slice(0, 80).replace(/\n/g, ' ');
-    activeProcesses.set(chatId, { proc, startTime: Date.now(), prompt: promptPreview });
-    proc._stoppedByUser = false;
+  // Resume existing session
+  if (hasSession) {
+    sdkOptions.resume = sessionId;
+  }
 
-    let stdout = '';
-    let stderr = '';
+  // Add MCP servers if any are configured
+  if (Object.keys(mcpServers).length > 0) {
+    sdkOptions.mcpServers = mcpServers;
+  }
 
-    proc.stdout.on('data', (data) => { stdout += data.toString(); });
-    proc.stderr.on('data', (data) => { stderr += data.toString(); });
+  // Track active query for /stop
+  activeQueries.set(chatId, { abortController, startTime: Date.now(), prompt: promptPreview });
 
-    // Only set timeout if configured (0 = no timeout)
-    let timer = null;
-    if (config.commandTimeoutMs > 0) {
-      timer = setTimeout(() => {
-        proc.kill('SIGTERM');
-        releaseClaudeSlot();
-        reject(new Error(`This task is too large for your current plan. Please upgrade your subscription to handle bigger tasks, or try breaking it into smaller steps — I'm happy to help with those!`));
-      }, config.commandTimeoutMs);
-    }
+  // Timeout handling
+  let timeoutTimer = null;
+  if (config.commandTimeoutMs > 0) {
+    timeoutTimer = setTimeout(() => {
+      abortController.abort();
+    }, config.commandTimeoutMs);
+  }
 
-    proc.on('close', (code) => {
-      if (timer) clearTimeout(timer);
-      releaseClaudeSlot();
+  try {
+    const queryHandle = sdkQuery({ prompt: fullPrompt, options: sdkOptions });
 
-      const processEntry = activeProcesses.get(chatId);
-      activeProcesses.delete(chatId);
+    let resultText = '';
+    let pendingText = '';
+    let lastFlushTime = Date.now();
+    let newSessionId = null;
+    let tokens = null;
+    const FLUSH_INTERVAL_MS = 3000;
 
-      const endTime = Date.now();
-      const startTime = processEntry ? processEntry.startTime : endTime;
-      const durationSecs = Math.round((endTime - startTime) / 1000);
-
-      if (proc._stoppedByUser) {
-        addTaskHistory(chatId, { prompt: promptPreview, startTime, endTime, durationSecs, tokens: null, status: 'stopped' });
-        return reject(new Error('STOPPED_BY_USER'));
+    for await (const message of queryHandle) {
+      // Capture session ID from init message
+      if (message.type === 'system' && message.subtype === 'init') {
+        newSessionId = message.session_id;
       }
 
-      // Build error message from stderr + stdout (Claude CLI often puts errors in stdout as JSON)
-      let errorDetail = stderr.trim();
-      if (!errorDetail && stdout.trim()) {
-        try {
-          const errJson = JSON.parse(stdout);
-          errorDetail = errJson.error || errJson.message || stdout.slice(0, 300);
-        } catch {
-          errorDetail = stdout.slice(0, 300);
-        }
-      }
+      // Stream assistant text as it arrives
+      if (message.type === 'assistant' && message.content) {
+        for (const block of message.content) {
+          if (block.type === 'text') {
+            pendingText += block.text;
+            resultText += block.text;
 
-      // Retry with fresh session if --resume failed (stale/expired session)
-      // Inject conversation history so context is preserved even without --resume
-      if (code !== 0 && hasSession && !_isRetry) {
-        logger.warn(`Resume failed for ${chatId} (code ${code}): ${errorDetail.slice(0, 200)}`);
-        clearSession(chatId);
-
-        // Load conversation history and prepend to prompt for context continuity
-        const history = conversation.loadHistory(sbKey, agentId);
-        let retryPrompt = prompt;
-        if (history.length > 0) {
-          const historyContext = conversation.formatHistoryAsContext(history);
-          retryPrompt = historyContext + prompt;
-          logger.info(`Injecting ${history.length} conversation history entries for ${chatId} retry`);
-        }
-
-        // Delay retry slightly to avoid racing with stale CLI state
-        setTimeout(() => resolve(runClaude(retryPrompt, chatId, sandboxKey, true)), 1000);
-        return;
-      }
-
-      if (code !== 0) {
-        // Classify the error for easier debugging
-        const errLower = errorDetail.toLowerCase();
-        const isAuthError = /auth|token|oauth|401|403|credential|expired|refresh|unauthorized|login/i.test(errorDetail);
-        const isUpdateError = /update|upgrade|version|outdated|deprecated/i.test(errorDetail);
-        const isRateLimit = /rate.?limit|429|too many|throttl/i.test(errorDetail);
-        const isOOM = /memory|oom|killed|signal 9/i.test(errorDetail) || code === 137;
-
-        let errorType = 'unknown';
-        if (isAuthError) errorType = 'AUTH';
-        else if (isUpdateError) errorType = 'UPDATE';
-        else if (isRateLimit) errorType = 'RATE_LIMIT';
-        else if (isOOM) errorType = 'OOM';
-
-        logger.error(`claude [${errorType}] exited with code ${code} for ${chatId}: ${errorDetail}`);
-        if (stderr.trim() && stderr !== errorDetail) {
-          logger.error(`claude full stderr: ${stderr.slice(0, 1000)}`);
-        }
-
-        addTaskHistory(chatId, { prompt: promptPreview, startTime, endTime, durationSecs, tokens: null, status: 'error' });
-        return reject(new Error(`Claude exited with code ${code}: ${errorDetail.slice(0, 200)}`));
-      }
-
-      let result = stdout;
-      let tokens = null;
-
-      // DEBUG: log raw stdout for diagnosis
-      logger.info(`Raw stdout (${stdout.length} bytes): ${stdout.slice(0, 500)}`);
-      if (stderr.trim()) {
-        logger.info(`Raw stderr: ${stderr.slice(0, 500)}`);
-      }
-
-      // Claude CLI may print warnings to stdout before the JSON line.
-      // Extract the last JSON object from stdout to handle this.
-      let jsonToParse = stdout;
-      const jsonMatch = stdout.match(/(\{[^\n]*"type"\s*:\s*"result"[^\n]*\})\s*$/);
-      if (jsonMatch) {
-        jsonToParse = jsonMatch[1];
-        logger.info(`JSON extracted via regex (${jsonToParse.length} bytes)`);
-      }
-
-      try {
-        const json = JSON.parse(jsonToParse);
-        if (json.session_id) {
-          sessions.set(sessionKey, json.session_id);
-          saveState();
-          if (!hasSession) {
-            logger.info(`New session created for ${agentId}: ${json.session_id}`);
-            activity.logSession(chatId, { agentId, action: 'create', sessionId: json.session_id });
+            const now = Date.now();
+            if (opts.onStream && (now - lastFlushTime > FLUSH_INTERVAL_MS || pendingText.includes('\n\n'))) {
+              await opts.onStream(pendingText);
+              pendingText = '';
+              lastFlushTime = now;
+            }
           }
         }
-        // Parse token usage if available — capture full breakdown
-        if (json.usage) {
+      }
+
+      // Flush pending text before tool use (so user sees partial response)
+      if (message.type === 'tool_use' && opts.onStream && pendingText) {
+        await opts.onStream(pendingText);
+        pendingText = '';
+        lastFlushTime = Date.now();
+      }
+
+      // Final result message
+      if (message.type === 'result') {
+        newSessionId = message.session_id || newSessionId;
+
+        if (message.result) {
+          resultText = message.result;
+        }
+
+        if (message.usage) {
           tokens = {
-            input: json.usage.input_tokens || 0,
-            output: json.usage.output_tokens || 0,
-            cacheCreation: json.usage.cache_creation_input_tokens || 0,
-            cacheRead: json.usage.cache_read_input_tokens || 0,
+            input: message.usage.input_tokens || 0,
+            output: message.usage.output_tokens || 0,
+            cacheCreation: message.usage.cache_creation_input_tokens || 0,
+            cacheRead: message.usage.cache_read_input_tokens || 0,
           };
         }
-        // Capture cost and API timing from Claude CLI
-        if (json.total_cost_usd != null) {
+        if (message.total_cost_usd != null) {
           if (!tokens) tokens = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
-          tokens.costUsd = json.total_cost_usd;
+          tokens.costUsd = message.total_cost_usd;
         }
-        if (json.duration_api_ms != null) {
+        if (message.duration_api_ms != null) {
           if (!tokens) tokens = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
-          tokens.apiDurationMs = json.duration_api_ms;
+          tokens.apiDurationMs = message.duration_api_ms;
         }
-        if (json.num_turns != null) {
+        if (message.num_turns != null) {
           if (!tokens) tokens = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
-          tokens.numTurns = json.num_turns;
-        }
-        result = json.result || stdout;
-      } catch (e) {
-        logger.warn(`Failed to parse JSON output (${e.message}), using raw text`);
-        // If raw stdout has non-JSON prefix lines, try to extract just the last line
-        const lines = stdout.trim().split('\n');
-        const lastLine = lines[lines.length - 1];
-        logger.info(`Last line fallback: ${lastLine.slice(0, 300)}`);
-        try {
-          const fallback = JSON.parse(lastLine);
-          result = fallback.result || lastLine;
-        } catch {
-          result = stdout;
+          tokens.numTurns = message.num_turns;
         }
       }
+    }
 
-      addTaskHistory(chatId, { prompt: promptPreview, startTime, endTime, durationSecs, tokens, status: 'completed' });
+    // Flush any remaining streamed text
+    if (pendingText && opts.onStream) {
+      await opts.onStream(pendingText);
+    }
 
-      // Log assistant response to conversation history
-      conversation.logEntry(sbKey, agentId, 'assistant', result);
+    // Save session
+    if (newSessionId) {
+      sessions.set(sessionKey, newSessionId);
+      saveState();
+      if (!hasSession) {
+        logger.info(`New session created for ${agentId}: ${newSessionId}`);
+        activity.logSession(chatId, { agentId, action: 'create', sessionId: newSessionId });
+      }
+    }
 
-      // Layer 3: filter sensitive content from output before sending to WhatsApp
-      const filtered = filterSensitiveOutput(result);
-      if (filtered.redacted) {
-        logger.warn(`Sensitive content redacted from Claude output (${chatId}): ${filtered.labels.join(', ')}`);
+    const endTime = Date.now();
+    const startTime = activeQueries.get(chatId)?.startTime || endTime;
+    const durationSecs = Math.round((endTime - startTime) / 1000);
+
+    addTaskHistory(chatId, { prompt: promptPreview, startTime, endTime, durationSecs, tokens, status: 'completed' });
+
+    // Log assistant response to conversation history
+    conversation.logEntry(sbKey, agentId, 'assistant', resultText);
+
+    // Filter sensitive content from output before sending to WhatsApp
+    const filtered = filterSensitiveOutput(resultText);
+    if (filtered.redacted) {
+      logger.warn(`Sensitive content redacted from Claude output (${chatId}): ${filtered.labels.join(', ')}`);
+    }
+
+    return sanitizePaths(filtered.text);
+
+  } catch (err) {
+    const endTime = Date.now();
+    const entry = activeQueries.get(chatId);
+    const startTime = entry?.startTime || endTime;
+    const durationSecs = Math.round((endTime - startTime) / 1000);
+
+    // Detect user-initiated abort or timeout
+    if (err.name === 'AbortError' || abortController.signal.aborted) {
+      addTaskHistory(chatId, { prompt: promptPreview, startTime, endTime, durationSecs, tokens: null, status: 'stopped' });
+      throw new Error('STOPPED_BY_USER');
+    }
+
+    // Retry with fresh session if resume failed (stale/expired session)
+    if (hasSession && !_isRetry) {
+      logger.warn(`Resume failed for ${chatId}: ${err.message?.slice(0, 200)}`);
+      clearSession(chatId);
+
+      const history = conversation.loadHistory(sbKey, agentId);
+      let retryPrompt = prompt;
+      if (history.length > 0) {
+        const historyContext = conversation.formatHistoryAsContext(history);
+        retryPrompt = historyContext + prompt;
+        logger.info(`Injecting ${history.length} conversation history entries for ${chatId} retry`);
       }
 
-      // Layer 4: strip server paths from output
-      resolve(sanitizePaths(filtered.text));
-    });
+      return new Promise(resolve => {
+        setTimeout(() => resolve(runClaude(retryPrompt, chatId, sandboxKey, true)), 1000);
+      });
+    }
 
-    proc.on('error', (err) => {
-      if (timer) clearTimeout(timer);
-      releaseClaudeSlot();
-      activeProcesses.delete(chatId);
-      reject(err);
-    });
-  });
+    // Classify the error for debugging
+    const errorDetail = err.message || '';
+    const isAuthError = /auth|token|oauth|401|403|credential|expired|refresh|unauthorized|login/i.test(errorDetail);
+    const isRateLimit = /rate.?limit|429|too many|throttl/i.test(errorDetail);
+    const isOOM = /memory|oom|killed|signal 9/i.test(errorDetail);
+
+    let errorType = 'unknown';
+    if (isAuthError) errorType = 'AUTH';
+    else if (isRateLimit) errorType = 'RATE_LIMIT';
+    else if (isOOM) errorType = 'OOM';
+
+    logger.error(`SDK query [${errorType}] failed for ${chatId}: ${errorDetail.slice(0, 500)}`);
+
+    addTaskHistory(chatId, { prompt: promptPreview, startTime, endTime, durationSecs, tokens: null, status: 'error' });
+    throw new Error(`Claude error: ${errorDetail.slice(0, 200)}`);
+
+  } finally {
+    if (timeoutTimer) clearTimeout(timeoutTimer);
+    activeQueries.delete(chatId);
+    releaseClaudeSlot();
+  }
 }
 
 function clearSession(chatId) {
@@ -908,33 +912,24 @@ function clearSession(chatId) {
   activity.logSession(chatId, { agentId, action: 'reset' });
 }
 
-// Kill the active claude process for a chat (user-initiated stop)
+// Abort the active SDK query for a chat (user-initiated stop)
 function stopClaude(chatId) {
-  const entry = activeProcesses.get(chatId);
+  const entry = activeQueries.get(chatId);
   if (!entry) return false;
 
-  const { proc } = entry;
-  // Mark as stopped before killing so close handler knows it was intentional
-  proc._stoppedByUser = true;
-
-  proc.kill('SIGTERM');
-  // Force kill after 3s if SIGTERM isn't enough
-  setTimeout(() => {
-    try { proc.kill('SIGKILL'); } catch (e) {}
-  }, 3000);
-
-  activeProcesses.delete(chatId);
-  logger.info(`Process stopped by user for chat ${chatId}`);
+  entry.abortController.abort();
+  activeQueries.delete(chatId);
+  logger.info(`Query stopped by user for chat ${chatId}`);
   return true;
 }
 
 function isRunning(chatId) {
-  return activeProcesses.has(chatId);
+  return activeQueries.has(chatId);
 }
 
 // Get info about the running task for /status
 function getRunningInfo(chatId) {
-  const entry = activeProcesses.get(chatId);
+  const entry = activeQueries.get(chatId);
   if (!entry) return null;
   const elapsed = Math.round((Date.now() - entry.startTime) / 1000);
   return { elapsed, prompt: entry.prompt };
@@ -985,7 +980,7 @@ function getTaskHistory(chatId) {
   return taskHistory.get(chatId) || [];
 }
 
-// ── Token usage counters ────────────────────────────────────────────────────
+// \u2500\u2500 Token usage counters \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 function addTokenUsage(chatId, tokens) {
   if (!tokens) return;
@@ -1021,7 +1016,7 @@ function markGreeted(chatId) {
   saveState();
 }
 
-// ── Subscription management ──────────────────────────────────────────────────
+// \u2500\u2500 Subscription management \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 function isSubscribed(waId) {
   return subscribedUsers.has(waId);
@@ -1043,7 +1038,7 @@ function getSubscribedUsers() {
   return [...subscribedUsers];
 }
 
-// ── Agent management ────────────────────────────────────────────────────────
+// \u2500\u2500 Agent management \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 function getUserAgent(chatId) {
   return activeAgents.get(chatId) || agents.getDefaultAgentId();
@@ -1059,7 +1054,7 @@ function setUserAgent(chatId, agentId) {
   logger.info(`Agent set for ${chatId}: ${agentId}`);
 }
 
-// ── Group isolation ─────────────────────────────────────────────────────────
+// \u2500\u2500 Group isolation \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 function isIsolatedGroup(chatId) {
   return isolatedGroups.has(chatId);
@@ -1138,4 +1133,5 @@ module.exports = {
   setPendingTask, clearPendingTask, getPendingTasks,
   setPersistedQueue, getPersistedQueue, clearPersistedQueue,
   clearConversationHistory: conversation.clearHistory,
+  _setSDKForTesting,
 };

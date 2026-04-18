@@ -24,6 +24,14 @@ const features = [
     botReply: "5 posts ready with captions and hashtags. Want me to schedule them?",
   },
   {
+    icon: "\uD83D\uDED2",
+    title: "Shopify Store Management",
+    description:
+      "Create products, update prices, manage inventory, and track orders \u2014 run your entire Shopify store from WhatsApp.",
+    userMessage: "Create Organic Cotton Hoodie, $59.99, sizes S, M, L, XL",
+    botReply: "Product created and live in your store! 4 variants added. Want to set inventory levels?",
+  },
+  {
     icon: "\uD83C\uDFA7",
     title: "Customer Support",
     description:
@@ -94,7 +102,7 @@ export default function Features() {
         <p className="mx-auto mt-4 max-w-2xl text-center text-body">
           No dashboards. No learning curve. Just tell Swayat what you need.
         </p>
-        <div className="mt-16 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="mt-16 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
           {features.map((f) => (
             <div
               key={f.title}

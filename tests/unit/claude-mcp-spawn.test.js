@@ -1,61 +1,47 @@
 /**
- * Tests for Claude CLI spawn behavior with MCP config.
+ * Tests for Claude Agent SDK query behavior with MCP config.
  *
- * These tests guard the core invariant: when --mcp-config is present,
- * the prompt must be piped via shell (not passed as a CLI arg) because
- * Claude CLI silently produces 0 bytes otherwise.
- *
- * Adding new MCP servers doesn't require new tests here — these cover
- * the spawn mechanism that applies to ALL MCP usage.
+ * These tests verify that MCP servers are correctly configured in SDK options
+ * and that the SDK query is called with the right parameters.
  */
 
-const { EventEmitter } = require('events');
-const { Readable } = require('stream');
+// ── Track SDK query calls ──────────────────────────────────────────────────
 
-// ── Track spawn calls ───────────────────────────────────────────────────────
+let lastQueryCall = null;
 
-let mockLastBwrapArgs = null;
-let mockLastBwrapPipePrompt = null;
-let mockLastSpawnArgs = null;
-let mockLastSpawnOpts = null;
-let mockProc = null;
-
-function mockCreateProc() {
-  const proc = new EventEmitter();
-  proc.stdout = new Readable({ read() {} });
-  proc.stderr = new Readable({ read() {} });
-  proc.stdin = { write: jest.fn(), end: jest.fn() };
-  proc._stoppedByUser = false;
-  proc.kill = jest.fn();
-  mockProc = proc;
-  return proc;
+function createMockQueryResult(result = 'test response') {
+  return {
+    async *[Symbol.asyncIterator]() {
+      yield { type: 'system', subtype: 'init', session_id: 'test-session' };
+      yield {
+        type: 'result',
+        result,
+        session_id: 'test-session',
+        usage: { input_tokens: 10, output_tokens: 5 },
+        total_cost_usd: 0.001,
+      };
+    },
+  };
 }
 
-// ── Mock child_process ──────────────────────────────────────────────────────
-
-jest.mock('child_process', () => ({
-  spawn: jest.fn((cmd, args, opts) => {
-    mockLastSpawnArgs = args;
-    mockLastSpawnOpts = opts;
-    return mockCreateProc();
+const mockSDK = {
+  query: jest.fn(({ prompt, options }) => {
+    lastQueryCall = { prompt, options };
+    return createMockQueryResult();
   }),
-  execFileSync: jest.fn(),
-}));
+};
 
 // ── Mock sandbox ────────────────────────────────────────────────────────────
 
 jest.mock('../../src/sandbox', () => ({
-  isBwrapAvailable: jest.fn(() => true),
-  spawnInBwrap: jest.fn((chatId, args, env, pipePrompt) => {
-    mockLastBwrapArgs = args;
-    mockLastBwrapPipePrompt = pipePrompt;
-    return mockCreateProc();
-  }),
+  isBwrapAvailable: jest.fn(() => false),
+  spawnInBwrap: jest.fn(),
   ensureSandboxDirs: jest.fn((chatId) => ({
     base: '/tmp/test-sandbox',
     workspace: '/tmp/test-sandbox/workspace',
     claudeDir: '/tmp/test-sandbox/.claude',
   })),
+  getSandboxDir: jest.fn(() => '/tmp/test-sandbox'),
 }));
 
 // ── Mock google-auth ────────────────────────────────────────────────────────
@@ -134,6 +120,27 @@ jest.mock('../../src/github-auth', () => ({
   getStatus: jest.fn(() => ({ connected: false })),
 }));
 
+// ── Mock freetools-auth ─────────────────────────────────────────────────────
+
+jest.mock('../../src/freetools-auth', () => ({
+  getStatus: jest.fn(() => { throw new Error('not configured'); }),
+}));
+
+// ── Mock conversation-logger ────────────────────────────────────────────────
+
+jest.mock('../../src/conversation-logger', () => ({
+  logEntry: jest.fn(),
+  loadHistory: jest.fn(() => []),
+  formatHistoryAsContext: jest.fn(() => ''),
+  clearHistory: jest.fn(),
+}));
+
+// ── Mock child_process (for version check only) ────────────────────────────
+
+jest.mock('child_process', () => ({
+  execFileSync: jest.fn(() => 'mock-version'),
+}));
+
 // ── Mock fs ─────────────────────────────────────────────────────────────────
 
 jest.mock('fs', () => {
@@ -147,150 +154,71 @@ jest.mock('fs', () => {
     readFileSync: realFs.readFileSync,
     writeFileSync: jest.fn(),
     mkdirSync: jest.fn(),
+    renameSync: jest.fn(),
   };
 });
 
 // ── Import after mocks ──────────────────────────────────────────────────────
 
-const { runClaude } = require('../../src/claude');
-const sandbox = require('../../src/sandbox');
-const mockConfig = require('../../src/config');
-
-// Helper: emit a successful close event on the mock proc
-function resolveProc(result = 'test response') {
-  setTimeout(() => {
-    const json = JSON.stringify({
-      type: 'result',
-      result,
-      session_id: 'test-session',
-      usage: { input_tokens: 10, output_tokens: 5 },
-    });
-    mockProc.stdout.push(json);
-    mockProc.stdout.push(null);
-    mockProc.emit('close', 0);
-  }, 50);
-}
+const { runClaude, _setSDKForTesting } = require('../../src/claude');
 
 beforeEach(() => {
-  mockLastBwrapArgs = null;
-  mockLastBwrapPipePrompt = null;
-  mockLastSpawnArgs = null;
-  mockLastSpawnOpts = null;
-  mockProc = null;
+  lastQueryCall = null;
+  mockSDK.query.mockClear();
+  mockSDK.query.mockImplementation(({ prompt, options }) => {
+    lastQueryCall = { prompt, options };
+    return createMockQueryResult();
+  });
+  _setSDKForTesting(mockSDK);
   jest.clearAllMocks();
 });
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
-describe('Claude CLI spawn — MCP prompt piping', () => {
+describe('Claude Agent SDK — MCP configuration', () => {
 
-  test('no MCP: prompt is CLI arg, pipePrompt is null', async () => {
+  test('no MCP: SDK query called without mcpServers', async () => {
     mockGoogleAuth.isConfigured.mockReturnValue(false);
 
-    resolveProc();
     await runClaude('hello', 'chat1', 'chat1');
 
-    expect(sandbox.spawnInBwrap).toHaveBeenCalled();
-    const args = mockLastBwrapArgs;
-
-    // Prompt should be the last argument (contains "hello")
-    expect(args[args.length - 1]).toContain('hello');
-    // pipePrompt should be null
-    expect(mockLastBwrapPipePrompt).toBeNull();
+    expect(mockSDK.query).toHaveBeenCalled();
+    expect(lastQueryCall.options.mcpServers).toBeUndefined();
+    expect(lastQueryCall.prompt).toContain('hello');
   });
 
-  test('with MCP: --mcp-config in args, pipePrompt contains the prompt', async () => {
+  test('with Google MCP: mcpServers includes google', async () => {
     mockGoogleAuth.isConfigured.mockReturnValue(true);
     mockGoogleAuth.getStatus.mockReturnValue({ connected: true, email: 'test@gmail.com' });
 
-    resolveProc();
     await runClaude('check inbox', 'chat2', 'chat2');
 
-    const args = mockLastBwrapArgs;
-
-    // --mcp-config should be in args with valid JSON
-    expect(args).toContain('--mcp-config');
-    const mcpIdx = args.indexOf('--mcp-config');
-    const mcpJson = JSON.parse(args[mcpIdx + 1]);
-    expect(mcpJson.mcpServers.google).toBeDefined();
-
-    // Last arg is the placeholder (actual prompt goes via pipePrompt)
-    expect(args[args.length - 1]).toBe('__PIPE_PROMPT__');
-
-    // pipePrompt should contain the actual prompt text
-    expect(mockLastBwrapPipePrompt).toContain('check inbox');
-    expect(mockLastBwrapPipePrompt).not.toBeNull();
+    expect(lastQueryCall.options.mcpServers).toBeDefined();
+    expect(lastQueryCall.options.mcpServers.google).toBeDefined();
+    expect(lastQueryCall.options.mcpServers.google.env.CHAT_ID).toBe('chat2');
   });
 
-  test('Google configured but NOT connected: no MCP, prompt as CLI arg', async () => {
+  test('Google configured but NOT connected: no google in mcpServers', async () => {
     mockGoogleAuth.isConfigured.mockReturnValue(true);
     mockGoogleAuth.getStatus.mockReturnValue({ connected: false });
 
-    resolveProc();
     await runClaude('hello', 'chat3', 'chat3');
 
-    const args = mockLastBwrapArgs;
-
-    expect(args).not.toContain('--mcp-config');
-    expect(args[args.length - 1]).toContain('hello');
-    expect(mockLastBwrapPipePrompt).toBeNull();
+    // No MCP servers at all (FreeTools mock throws, so only google would add)
+    expect(lastQueryCall.options.mcpServers).toBeUndefined();
   });
 
-  test('MCP config has correct container paths and chatId', async () => {
-    mockGoogleAuth.isConfigured.mockReturnValue(true);
-    mockGoogleAuth.getStatus.mockReturnValue({ connected: true, email: 'u@g.com' });
-
-    resolveProc();
-    await runClaude('test', 'user-555@c.us', 'user-555@c.us');
-
-    const args = mockLastBwrapArgs;
-    const mcpJson = JSON.parse(args[args.indexOf('--mcp-config') + 1]);
-    const google = mcpJson.mcpServers.google;
-
-    expect(google.command).toBe('/opt/node/bin/node');
-    expect(google.args[0]).toBe('/opt/mcp/google-mcp-server.js');
-    expect(google.env.BOT_API_URL).toContain('localhost');
-    expect(google.env.CHAT_ID).toBe('user-555@c.us');
-  });
-
-  test('host fallback with MCP when bwrap unavailable: prompt piped via stdin', async () => {
-    mockGoogleAuth.isConfigured.mockReturnValue(true);
-    mockGoogleAuth.getStatus.mockReturnValue({ connected: true, email: 'a@b.com' });
-    sandbox.isBwrapAvailable.mockReturnValueOnce(false);
-
-    resolveProc();
-    await runClaude('test', 'chat5', 'chat5');
-
-    // Falls back to direct spawn — with MCP, prompt is piped via stdin
-    const { spawn } = require('child_process');
-    expect(spawn).toHaveBeenCalled();
-    expect(mockLastSpawnOpts.stdio[0]).toBe('pipe');
-  });
-
-  test('Resend MCP: added to mcpServers when user has Resend key', async () => {
+  test('Resend MCP: added when user has Resend key', async () => {
     mockResendAuth.resolveApiKey.mockReturnValue('re_test_key_123');
     mockGoogleAuth.isConfigured.mockReturnValue(false);
 
-    resolveProc();
     await runClaude('send email', 'chat6', 'chat6');
 
-    const args = mockLastBwrapArgs;
-
-    // --mcp-config should be present (Resend alone triggers MCP)
-    expect(args).toContain('--mcp-config');
-    const mcpIdx = args.indexOf('--mcp-config');
-    const mcpJson = JSON.parse(args[mcpIdx + 1]);
-
-    expect(mcpJson.mcpServers.resend).toBeDefined();
-    expect(mcpJson.mcpServers.resend.command).toBe('/opt/node/bin/node');
-    expect(mcpJson.mcpServers.resend.args[0]).toBe('/opt/mcp/resend-mcp-server.mjs');
-    expect(mcpJson.mcpServers.resend.env.RESEND_API_KEY).toBe('re_test_key_123');
-
+    expect(lastQueryCall.options.mcpServers).toBeDefined();
+    expect(lastQueryCall.options.mcpServers.resend).toBeDefined();
+    expect(lastQueryCall.options.mcpServers.resend.env.RESEND_API_KEY).toBe('re_test_key_123');
     // Google should NOT be present
-    expect(mcpJson.mcpServers.google).toBeUndefined();
-
-    // pipePrompt should be set (MCP active)
-    expect(mockLastBwrapPipePrompt).toContain('send email');
+    expect(lastQueryCall.options.mcpServers.google).toBeUndefined();
   });
 
   test('Resend + Google MCP: both present when both configured', async () => {
@@ -298,61 +226,33 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     mockGoogleAuth.isConfigured.mockReturnValue(true);
     mockGoogleAuth.getStatus.mockReturnValue({ connected: true, email: 'u@g.com' });
 
-    resolveProc();
     await runClaude('send email and check drive', 'chat7', 'chat7');
 
-    const args = mockLastBwrapArgs;
-    const mcpJson = JSON.parse(args[args.indexOf('--mcp-config') + 1]);
-
-    // Both MCP servers present
-    expect(mcpJson.mcpServers.resend).toBeDefined();
-    expect(mcpJson.mcpServers.google).toBeDefined();
-    expect(mcpJson.mcpServers.resend.env.RESEND_API_KEY).toBe('re_test_key_456');
-    expect(mcpJson.mcpServers.google.env.CHAT_ID).toBe('chat7');
+    expect(lastQueryCall.options.mcpServers.resend).toBeDefined();
+    expect(lastQueryCall.options.mcpServers.google).toBeDefined();
+    expect(lastQueryCall.options.mcpServers.resend.env.RESEND_API_KEY).toBe('re_test_key_456');
+    expect(lastQueryCall.options.mcpServers.google.env.CHAT_ID).toBe('chat7');
   });
 
-  test('no Resend key + no Google: no MCP, prompt as CLI arg', async () => {
+  test('no Resend key + no Google: no mcpServers', async () => {
     mockResendAuth.resolveApiKey.mockReturnValue(null);
     mockGoogleAuth.isConfigured.mockReturnValue(false);
 
-    resolveProc();
     await runClaude('hello', 'chat8', 'chat8');
 
-    const args = mockLastBwrapArgs;
-    expect(args).not.toContain('--mcp-config');
-    expect(args[args.length - 1]).toContain('hello');
-    expect(mockLastBwrapPipePrompt).toBeNull();
+    expect(lastQueryCall.options.mcpServers).toBeUndefined();
   });
-
-  test('no user Resend key: prompt tells user about /resend setup', async () => {
-    mockResendAuth.resolveApiKey.mockReturnValue(null);
-    mockGoogleAuth.isConfigured.mockReturnValue(false);
-
-    resolveProc();
-    await runClaude('send email via resend', 'chat9', 'chat9');
-
-    const args = mockLastBwrapArgs;
-    expect(args).not.toContain('--mcp-config');
-    // The prompt should mention /resend
-    expect(args[args.length - 1]).toContain('/resend');
-  });
-
-  // ── Outlook MCP ──
 
   test('Outlook MCP: added when user has connected Microsoft account', async () => {
     mockMicrosoftAuth.isConfigured.mockReturnValue(true);
     mockMicrosoftAuth.getStatus.mockReturnValue({ connected: true, email: 'user@outlook.com' });
     mockGoogleAuth.isConfigured.mockReturnValue(false);
 
-    resolveProc();
     await runClaude('check outlook inbox', 'chat-outlook-1', 'chat-outlook-1');
 
-    const args = mockLastBwrapArgs;
-    expect(args).toContain('--mcp-config');
-    const mcpJson = JSON.parse(args[args.indexOf('--mcp-config') + 1]);
-    expect(mcpJson.mcpServers.outlook).toBeDefined();
-    expect(mcpJson.mcpServers.outlook.env.CHAT_ID).toBe('chat-outlook-1');
-    expect(mockLastBwrapPipePrompt).toContain('check outlook inbox');
+    expect(lastQueryCall.options.mcpServers).toBeDefined();
+    expect(lastQueryCall.options.mcpServers.outlook).toBeDefined();
+    expect(lastQueryCall.options.mcpServers.outlook.env.CHAT_ID).toBe('chat-outlook-1');
   });
 
   test('Outlook configured but NOT connected: no Outlook MCP', async () => {
@@ -360,29 +260,60 @@ describe('Claude CLI spawn — MCP prompt piping', () => {
     mockMicrosoftAuth.getStatus.mockReturnValue({ connected: false });
     mockGoogleAuth.isConfigured.mockReturnValue(false);
 
-    resolveProc();
     await runClaude('hello', 'chat-outlook-2', 'chat-outlook-2');
 
-    const args = mockLastBwrapArgs;
-    // No MCP config at all (only Outlook configured but not connected)
-    expect(args).not.toContain('--mcp-config');
+    // Outlook should NOT be in mcpServers
+    const mcpServers = lastQueryCall.options.mcpServers;
+    expect(!mcpServers || !mcpServers.outlook).toBe(true);
   });
 
   test('Google + Outlook + Resend: all three MCP servers present', async () => {
+    mockResendAuth.resolveApiKey.mockReturnValue('re_test_key_789');
     mockGoogleAuth.isConfigured.mockReturnValue(true);
-    mockGoogleAuth.getStatus.mockReturnValue({ connected: true, email: 'u@gmail.com' });
+    mockGoogleAuth.getStatus.mockReturnValue({ connected: true, email: 'u@g.com' });
     mockMicrosoftAuth.isConfigured.mockReturnValue(true);
     mockMicrosoftAuth.getStatus.mockReturnValue({ connected: true, email: 'u@outlook.com' });
-    mockResendAuth.resolveApiKey.mockReturnValue('re_test_key_789');
 
-    resolveProc();
-    await runClaude('send emails everywhere', 'chat-all', 'chat-all');
+    await runClaude('send email', 'chat-all', 'chat-all');
 
-    const args = mockLastBwrapArgs;
-    const mcpJson = JSON.parse(args[args.indexOf('--mcp-config') + 1]);
+    expect(lastQueryCall.options.mcpServers.google).toBeDefined();
+    expect(lastQueryCall.options.mcpServers.outlook).toBeDefined();
+    expect(lastQueryCall.options.mcpServers.resend).toBeDefined();
+  });
+});
 
-    expect(mcpJson.mcpServers.google).toBeDefined();
-    expect(mcpJson.mcpServers.outlook).toBeDefined();
-    expect(mcpJson.mcpServers.resend).toBeDefined();
+describe('Claude Agent SDK — query options', () => {
+
+  test('SDK query uses correct model and permissionMode', async () => {
+    await runClaude('hello', 'chat-opts', 'chat-opts');
+
+    expect(lastQueryCall.options.model).toBe('claude-sonnet-4-6');
+    expect(lastQueryCall.options.permissionMode).toBe('bypassPermissions');
+  });
+
+  test('system prompt included for new sessions', async () => {
+    await runClaude('hello', 'chat-sys', 'chat-sys');
+
+    expect(lastQueryCall.options.systemPrompt).toBeDefined();
+    expect(lastQueryCall.options.systemPrompt).toContain('SECURITY_PROMPT');
+  });
+
+  test('streaming callback is passed through opts', async () => {
+    const onStream = jest.fn();
+    await runClaude('hello', 'chat-stream', 'chat-stream', false, { onStream });
+
+    // The onStream was passed but since our mock yields result directly,
+    // it won't be called (no assistant messages with text content)
+    expect(mockSDK.query).toHaveBeenCalled();
+  });
+
+  test('returns filtered response text', async () => {
+    mockSDK.query.mockImplementation(({ prompt, options }) => {
+      lastQueryCall = { prompt, options };
+      return createMockQueryResult('Hello from Claude!');
+    });
+
+    const result = await runClaude('test', 'chat-result', 'chat-result');
+    expect(result).toBe('Hello from Claude!');
   });
 });

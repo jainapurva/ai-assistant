@@ -1,3 +1,5 @@
+import VideoModal from "./VideoModal";
+
 export default function Hero() {
   return (
     <section className="relative flex min-h-screen items-center justify-center overflow-hidden px-6 pt-20">
@@ -29,27 +31,32 @@ export default function Hero() {
           </p>
           <div className="mt-10 flex flex-col items-center gap-4 sm:flex-row lg:justify-start sm:justify-center">
             <a
-              href="#waitlist"
+              href="#signup"
               className="rounded-full bg-primary px-8 py-3.5 text-lg font-semibold text-white transition hover:bg-primary-dark"
             >
-              Join Waitlist
+              Get Started Free
             </a>
-            <a
-              href="#how-it-works"
-              className="rounded-full border border-slate-300 px-8 py-3.5 text-lg font-semibold text-heading transition hover:border-primary hover:bg-primary/5"
-            >
-              See How It Works
-            </a>
+            <VideoModal
+              src="/videos/swayat-demo-invoice.mp4"
+              trigger={
+                <span className="inline-flex items-center gap-2 rounded-full border border-slate-300 px-8 py-3.5 text-lg font-semibold text-heading transition hover:border-primary hover:bg-primary/5">
+                  <svg className="h-5 w-5 text-primary" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M8 5v14l11-7z" />
+                  </svg>
+                  See How It Works
+                </span>
+              }
+            />
           </div>
           <p className="mt-6 text-sm text-muted">
             No app to install. No dashboard to learn. Just WhatsApp.
           </p>
-          <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
+          <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-green-200 bg-green-50 px-4 py-2 text-sm text-green-800">
             <span className="relative flex h-2.5 w-2.5">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
-              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-amber-500" />
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-green-500" />
             </span>
-            Rolling out beta access — limited spots per batch
+            Now open — sign up and start in minutes
           </div>
         </div>
 

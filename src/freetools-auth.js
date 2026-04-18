@@ -109,9 +109,9 @@ async function ensureAccount(chatId) {
 
   // If we have a valid JWT, use it
   if (existing?.token) {
-    // Tokens are valid for 7 days — refresh if within 1 day of expiry
+    // Tokens are valid for ~1 day — refresh if within 1 hour of expiry
     const expiresAt = existing.tokenExpiresAt ? new Date(existing.tokenExpiresAt) : null;
-    if (!expiresAt || expiresAt > new Date(Date.now() + 86400_000)) {
+    if (!expiresAt || expiresAt > new Date(Date.now() + 3600_000)) {
       return { token: existing.token, email };
     }
   }
@@ -126,7 +126,7 @@ async function ensureAccount(chatId) {
     setAccount(chatId, {
       email,
       token,
-      tokenExpiresAt: new Date(Date.now() + 7 * 86400_000).toISOString(),
+      tokenExpiresAt: new Date(Date.now() + 1 * 86400_000).toISOString(),
     });
     return { token, email };
   } catch (loginErr) {
@@ -168,13 +168,31 @@ async function ensureAccount(chatId) {
 
 /**
  * Make an authenticated API call to freetools on behalf of chatId.
+ * Retries once with a fresh token if the server returns 401.
  */
 async function apiCall(chatId, method, apiPath, body = null) {
   const { token } = await ensureAccount(chatId);
-  return ftFetch(apiPath, {
-    method,
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  }, token);
+  try {
+    return await ftFetch(apiPath, {
+      method,
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    }, token);
+  } catch (err) {
+    if (err.message.includes('401') || err.message.toLowerCase().includes('authentication required')) {
+      // Token rejected server-side — clear cached token and re-authenticate
+      logger.info(`freetools-auth: token rejected for ${chatId}, re-authenticating`);
+      const acc = getAccount(chatId);
+      if (acc) {
+        setAccount(chatId, { ...acc, token: null, tokenExpiresAt: null });
+      }
+      const { token: freshToken } = await ensureAccount(chatId);
+      return ftFetch(apiPath, {
+        method,
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      }, freshToken);
+    }
+    throw err;
+  }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────

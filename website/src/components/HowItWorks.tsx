@@ -1,9 +1,9 @@
 const steps = [
   {
     step: "1",
-    title: "Join the waitlist",
+    title: "Sign up for free",
     description:
-      "Tell us about your business. We onboard in small batches to give every customer a white-glove setup.",
+      "Create your account in seconds. Tell us about your business and we'll set up your AI assistant.",
   },
   {
     step: "2",
@@ -24,7 +24,7 @@ export default function HowItWorks() {
     <section id="how-it-works" className="bg-surface-light px-6 py-24">
       <div className="mx-auto max-w-4xl">
         <h2 className="text-center text-3xl font-bold text-heading sm:text-4xl">
-          From waitlist to <span className="text-primary">more profit</span> in
+          From sign-up to <span className="text-primary">more profit</span> in
           3 steps
         </h2>
 
@@ -50,13 +50,13 @@ export default function HowItWorks() {
         {/* CTA */}
         <div className="mt-14 text-center">
           <a
-            href="#waitlist"
+            href="#signup"
             className="inline-block rounded-full bg-primary px-8 py-3.5 text-lg font-semibold text-white transition hover:bg-primary-dark"
           >
-            Join Waitlist
+            Get Started Free
           </a>
           <p className="mt-3 text-sm text-muted">
-            Limited spots per batch. No credit card required.
+            No credit card required. Start in minutes.
           </p>
         </div>
       </div>

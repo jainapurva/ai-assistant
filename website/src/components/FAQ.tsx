@@ -13,7 +13,7 @@ const faqs = [
   },
   {
     q: "How do I get access?",
-    a: "We're rolling out beta access in small batches to ensure every business gets a great onboarding experience. Join the waitlist and we'll reach out when it's your turn. Beta users get full access to all tools at no cost during the beta period.",
+    a: "Sign up for free on our website and you'll get instant access to your AI assistant on WhatsApp. The free Starter plan includes 100 messages per month and one business tool. Upgrade anytime for more features.",
   },
   {
     q: "What business tools are included?",

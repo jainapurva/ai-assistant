@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { DEMO_USER } from "@/lib/demo-data";
+import crypto from "crypto";
+
+const TOKEN_SECRET = process.env.JWT_SECRET || "swayat-default-secret-change-me";
 
 export async function POST(req: Request) {
   try {
@@ -31,7 +34,40 @@ export async function POST(req: Request) {
       }
     }
 
-    // TODO: real token verification
+    // Real user token verification
+    if (token.startsWith("user.")) {
+      try {
+        const parts = token.split(".");
+        if (parts.length !== 3) {
+          return NextResponse.json({ valid: false }, { status: 401 });
+        }
+        const data = parts[1];
+        const sig = parts[2];
+
+        // Verify signature
+        const expectedSig = crypto.createHmac("sha256", TOKEN_SECRET).update(data).digest("hex").slice(0, 32);
+        if (sig !== expectedSig) {
+          return NextResponse.json({ valid: false }, { status: 401 });
+        }
+
+        const payload = JSON.parse(Buffer.from(data, "base64url").toString());
+        if (payload.exp < Date.now()) {
+          return NextResponse.json({ valid: false, reason: "expired" }, { status: 401 });
+        }
+
+        return NextResponse.json({
+          valid: true,
+          user: {
+            name: payload.name,
+            email: payload.email,
+            phone: payload.phone,
+          },
+        });
+      } catch {
+        return NextResponse.json({ valid: false }, { status: 401 });
+      }
+    }
+
     return NextResponse.json({ valid: false }, { status: 401 });
   } catch {
     return NextResponse.json({ error: "Server error" }, { status: 500 });

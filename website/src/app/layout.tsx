@@ -153,7 +153,7 @@ const jsonLd = [
         name: "How do I get access to Swayat AI?",
         acceptedAnswer: {
           "@type": "Answer",
-          text: "We're rolling out beta access in small batches to ensure the best experience for every business. Join the waitlist on our website and we'll reach out when it's your turn.",
+          text: "Sign up for free on our website and get instant access to your AI assistant on WhatsApp. No credit card required.",
         },
       },
       {

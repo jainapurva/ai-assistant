@@ -253,6 +253,16 @@ function spawnInBwrap(chatId, claudeArgs, env, pipePrompt = null) {
     '--unsetenv', 'CLAUDECODE',
   ];
 
+  // Add tools (read-only)
+  const invoicePdfBundle = path.resolve(__dirname, '..', 'dist', 'invoice-pdf.bundle.js');
+  const invoicePdfData = path.resolve(__dirname, '..', 'dist', 'data');
+  if (fs.existsSync(invoicePdfBundle)) {
+    bwrapArgs.push('--ro-bind', invoicePdfBundle, '/opt/tools/invoice-pdf.js');
+  }
+  if (fs.existsSync(invoicePdfData)) {
+    bwrapArgs.push('--ro-bind', invoicePdfData, '/opt/tools/data');
+  }
+
   // Add MCP server mounts at /opt/mcp/ (read-only)
   const mcpMounts = [
     { host: path.resolve(config.mcpServerPath), internal: '/opt/mcp/google-mcp-server.js' },

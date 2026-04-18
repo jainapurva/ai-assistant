@@ -83,7 +83,7 @@ export default function SignIn() {
               </svg>
             </div>
             <h1 className="mt-4 text-2xl font-bold text-heading">Welcome Back</h1>
-            <p className="mt-2 text-sm text-muted">Sign in to view your leads, properties, and pipeline.</p>
+            <p className="mt-2 text-sm text-muted">Sign in to your Swayat AI dashboard.</p>
           </div>
 
           <form onSubmit={handleLogin} className="mt-8 space-y-4">
@@ -100,7 +100,12 @@ export default function SignIn() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-heading mb-1.5">Password</label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-sm font-medium text-heading">Password</label>
+                <a href="/forgot-password" className="text-sm font-medium text-primary transition hover:text-primary-dark">
+                  Forgot password?
+                </a>
+              </div>
               <input
                 type="password"
                 value={password}
@@ -126,9 +131,9 @@ export default function SignIn() {
           )}
 
           <p className="mt-6 text-center text-sm text-muted">
-            Not a beta user?{" "}
-            <a href="/#waitlist" className="font-medium text-primary transition hover:text-primary-dark">
-              Join the waitlist
+            Don&apos;t have an account?{" "}
+            <a href="/#signup" className="font-medium text-primary transition hover:text-primary-dark">
+              Sign up for free
             </a>
           </p>
         </div>

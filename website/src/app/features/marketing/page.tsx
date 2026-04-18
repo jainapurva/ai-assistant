@@ -126,10 +126,10 @@ export default function MarketingPage() {
             </p>
             <div className="mt-10 flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
               <a
-                href="/#waitlist"
+                href="/#signup"
                 className="rounded-full bg-primary px-8 py-3.5 text-lg font-semibold text-white transition hover:bg-primary-dark"
               >
-                Join Waitlist
+                Get Started
               </a>
               <a
                 href="#how-it-works"
@@ -393,10 +393,10 @@ export default function MarketingPage() {
             </p>
             <div className="mt-10">
               <a
-                href="/#waitlist"
+                href="/#signup"
                 className="inline-block rounded-full bg-primary px-8 py-3.5 text-lg font-semibold text-white transition hover:bg-primary-dark"
               >
-                Join Waitlist
+                Get Started
               </a>
               <p className="mt-4 text-sm text-muted">
                 No credit card required. 100 free messages/month.

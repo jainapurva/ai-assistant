@@ -41,9 +41,15 @@ module.exports = {
   microsoftClientId: process.env.MICROSOFT_CLIENT_ID || '',
   microsoftClientSecret: process.env.MICROSOFT_CLIENT_SECRET || '',
   microsoftRedirectUri: process.env.MICROSOFT_REDIRECT_URI || '',
+  // Shopify OAuth (for per-user Shopify store management)
+  shopifyClientId: process.env.SHOPIFY_CLIENT_ID || '',
+  shopifyClientSecret: process.env.SHOPIFY_CLIENT_SECRET || '',
+  shopifyRedirectUri: process.env.SHOPIFY_REDIRECT_URI || '',
   // MCP server paths (for Google integration inside sandboxes)
   nodeBinaryPath: process.env.NODE_BINARY_PATH || '/home/ddarji/.nvm/versions/node/v20.20.0/bin/node',
   mcpServerPath: process.env.MCP_SERVER_PATH || path.join(__dirname, '..', 'dist', 'google-mcp-server.bundle.js'),
+  // Shopify MCP server path
+  shopifyMcpPath: process.env.SHOPIFY_MCP_PATH || path.join(__dirname, '..', 'dist', 'shopify-mcp-server.bundle.js'),
   // GitHub App (for repo management via Website Manager agent)
   githubAppId: process.env.GITHUB_APP_ID || '',
   githubAppSlug: process.env.GITHUB_APP_SLUG || 'swayat-ai',

@@ -9,6 +9,7 @@ const apiCommands = require('./api-commands');
 const drive = require('./drive');
 const googleAuth = require('./google-auth');
 const microsoftAuth = require('./microsoft-auth');
+const shopifyAuth = require('./shopify-auth');
 const resendAuth = require('./resend-auth');
 const freetoolsAuth = require('./freetools-auth');
 const { stripAnsi, chunkMessage, markdownToWhatsApp } = require('./formatter');
@@ -17,6 +18,7 @@ const { discoverProjects, getProjectSummary } = require('./projects');
 const sandbox = require('./sandbox');
 const scheduler = require('./scheduler');
 const nurtureRunner = require('./nurture-runner');
+const clientProjects = require('./client-projects');
 const logger = require('./logger');
 const chatLogger = require('./chat-logger');
 const activity = require('./activity-logger');
@@ -222,7 +224,7 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
   // Only show "Working on it..." if Claude takes more than 5 seconds
   const WORKING_DELAY_MS = 5000;
   let workingSent = false;
-  const workingTimer = setTimeout(async () => {
+  let workingTimer = setTimeout(async () => {
     try {
       workingSent = true;
       await botReply(msg, '⚡ Working on it...');
@@ -234,12 +236,14 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
     const sbKey = getSandboxKey(chatId, senderId || config.whitelistedNumber);
 
     // Snapshot workspace files before Claude runs (for detecting new output files)
-    // Only enabled when sandbox is active — never scan host filesystem
-    const useSandbox = config.sandboxEnabled && sandbox.isBwrapAvailable();
+    // Scan both the main workspace AND the agent-specific workspace (agents use separate dirs)
     let workspaceDir = null;
+    let agentWorkspaceDir = null;
     let filesBefore = new Map(); // relative path -> mtime
-    if (useSandbox) {
-      workspaceDir = path.join(sandbox.getSandboxDir(sbKey), 'workspace');
+    if (config.sandboxEnabled) {
+      const sandboxDir = sandbox.getSandboxDir(sbKey);
+      workspaceDir = path.join(sandboxDir, 'workspace');
+      agentWorkspaceDir = path.join(sandboxDir, 'agents', agentId);
       try {
         const scanDir = (dir, prefix = '') => {
           for (const f of fs.readdirSync(dir)) {
@@ -253,12 +257,40 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
           }
         };
         scanDir(workspaceDir);
+        if (agentWorkspaceDir && fs.existsSync(agentWorkspaceDir)) scanDir(agentWorkspaceDir);
       } catch {}
     }
 
-    const rawResponse = await runClaude(prompt, chatId, sbKey, false, { useBrowser: !!opts.useBrowser });
-    clearTimeout(workingTimer);
-    const cleaned = stripAnsi(rawResponse).trim();
+    // Streaming callback — sends partial responses to WhatsApp as Claude generates them
+    let streamedChunks = 0;
+    const onStream = async (chunk) => {
+      // Cancel "Working on it..." timer on first stream
+      if (workingTimer) {
+        clearTimeout(workingTimer);
+        workingTimer = null;
+      }
+      // Strip schedule/remind tags from streamed chunks (processed from full response later)
+      const strippedChunk = scheduler.stripScheduleTags(chunk);
+      if (!strippedChunk) return;
+      streamedChunks++;
+      const formatted = markdownToWhatsApp(sanitizePaths(strippedChunk));
+      const msgChunks = chunkMessage(formatted, config.maxChunkSize);
+      for (const c of msgChunks) {
+        await provider.replyToMessage(msg, c);
+      }
+    };
+
+    const rawResponse = await runClaude(prompt, chatId, sbKey, false, { useBrowser: !!opts.useBrowser, onStream });
+    if (workingTimer) clearTimeout(workingTimer);
+
+    // Extract and create any scheduled tasks / reminders from Claude's response
+    const { schedules: newSchedules, cleaned: scheduleStripped } = scheduler.extractScheduleTags(stripAnsi(rawResponse).trim());
+    for (const sched of newSchedules) {
+      const task = scheduler.createSchedule(chatId, sched.cron, sched.prompt, sched.friendly, sched.type);
+      logger.info(`${sched.type === 'remind' ? 'Reminder' : 'Schedule'} created from Claude response: "${sched.prompt}" (${sched.friendly}) [${task.id}]`);
+    }
+
+    const cleaned = scheduleStripped;
 
     // Detect new files Claude created and send them to the user (sandbox-only)
     // < 10MB → send via WhatsApp directly
@@ -270,7 +302,18 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
     const NATIVE_MEDIA_EXTS = new Set([...IMAGE_EXTS, ...VIDEO_EXTS, ...AUDIO_EXTS]);
     const DRIVE_THRESHOLD_BYTES = 10 * 1024 * 1024; // 10MB — above this, upload to Drive
 
-    if (useSandbox && workspaceDir) try {
+    // Extract filenames mentioned in Claude's response — only send files Claude explicitly references.
+    // This prevents intermediate artifacts (extracted frames, temp audio, downloaded images) from
+    // being sent to the user when Claude only intends to deliver the final output.
+    const mentionedFiles = new Set();
+    const extPattern = [...SENDABLE_EXTS].map(e => e.replace('.', '').replace('+', '\\+')).join('|');
+    const fileRefRegex = new RegExp(`[\\w./@-]+\\.(${extPattern})\\b`, 'gi');
+    for (const m of cleaned.matchAll(fileRefRegex)) {
+      mentionedFiles.add(path.basename(m[0]).toLowerCase());
+    }
+    const filterByMentions = mentionedFiles.size > 0;
+
+    if (config.sandboxEnabled && workspaceDir) try {
       // Recursively collect all files after Claude ran
       const filesAfterList = [];
       const scanAfter = (dir, prefix = '') => {
@@ -285,6 +328,7 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
         }
       };
       scanAfter(workspaceDir);
+      if (agentWorkspaceDir && fs.existsSync(agentWorkspaceDir)) scanAfter(agentWorkspaceDir);
 
       const fileSenderId = senderId || config.whitelistedNumber;
       const driveConnected = drive.isConfigured() && googleAuth.isConfigured() && googleAuth.getStatus(fileSenderId).connected;
@@ -300,6 +344,11 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
           const ext = path.extname(basename).toLowerCase();
           if (!SENDABLE_EXTS.has(ext)) continue;
           if (stat.size === 0) continue;
+          // Only send files Claude explicitly mentioned in its response — skip intermediate artifacts
+          if (filterByMentions && !mentionedFiles.has(basename.toLowerCase())) {
+            logger.info(`Skipping intermediate file: ${relPath} (not mentioned in response)`);
+            continue;
+          }
 
           if (stat.size >= DRIVE_THRESHOLD_BYTES) {
             // Large file → upload to Google Drive
@@ -344,16 +393,21 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
     if (!cleaned) {
       chatLogger.logAIResponse(logSenderId, chatId, '(no text output)');
       activity.logMessageOut(chatId, { agentId, content: '(no text output)', chunks: 1, trigger: 'claude' });
-      await botReply(msg, '✅ Done (no text output)');
+      if (streamedChunks === 0) {
+        await botReply(msg, '\u2705 Done (no text output)');
+      }
       return;
     }
 
     chatLogger.logAIResponse(logSenderId, chatId, cleaned);
     activity.logMessageOut(chatId, { agentId, content: cleaned, trigger: 'claude' });
-    await sendClaudeResponse(msg, chatId, cleaned);
-    logger.info(`Response sent (${cleaned.length} chars)`);
+    // Only send final response if nothing was streamed (short/fast responses)
+    if (streamedChunks === 0) {
+      await sendClaudeResponse(msg, chatId, cleaned);
+    }
+    logger.info(`Response sent (${cleaned.length} chars, ${streamedChunks} streamed chunks)`);
   } catch (err) {
-    clearTimeout(workingTimer);
+    if (workingTimer) clearTimeout(workingTimer);
     if (err.message === 'STOPPED_BY_USER') {
       logger.info(`Task stopped by user for chat ${chatId}`);
       chatLogger.logError(logSenderId, chatId, 'Stopped by user');
@@ -430,6 +484,7 @@ _Files I create are automatically sent back to you!_
 /files - See & download files from your workspace
 /gmail - Connect Gmail & Google Drive
 /outlook - Connect Outlook email
+/shopify - Connect your Shopify store
 /resend - Set up email sending via Resend
 /github - Connect your GitHub repos
 /repos - List connected repos
@@ -984,6 +1039,81 @@ if (microsoftAuth.isConfigured()) {
   logger.info('Microsoft integration enabled (Outlook Mail)');
 }
 
+// --- Shopify OAuth callback (registered on public webhook server) ---
+
+if (shopifyAuth.isConfigured()) {
+  provider.addRoute('GET', '/auth/shopify/callback', async (req, res) => {
+    try {
+      const url = new URL(req.url, `http://localhost:${config.webhookPort}`);
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      const shop = url.searchParams.get('shop');
+      const error = url.searchParams.get('error');
+
+      if (error) {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<h2>Authorization cancelled.</h2><p>You can close this window and try /shopify login again in WhatsApp.</p>');
+        return;
+      }
+
+      if (!code || !state || !shop) {
+        res.writeHead(400, { 'Content-Type': 'text/html' });
+        res.end('<h2>Missing authorization code.</h2>');
+        return;
+      }
+
+      // Build query params for HMAC verification
+      const hmacQuery = {};
+      for (const [key, value] of url.searchParams.entries()) {
+        hmacQuery[key] = value;
+      }
+
+      const result = await shopifyAuth.handleCallback(code, state, shop, hmacQuery);
+
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<h2>Shopify connected!</h2><p>Store: <b>${result.shopName || result.shop}</b></p><p>You can now manage your store via WhatsApp.</p><p>Close this window and return to WhatsApp.</p>`);
+
+      await botSendMessage(result.waId, `*Shopify connected!*\n\nStore: *${result.shopName || result.shop}*\n\nYou can now:\n• List & manage products\n• View & fulfill orders\n• Search customers\n• Manage inventory\n• Create discount codes\n\nJust ask me in natural language!\n\n\`/shopify logout\` to disconnect.`);
+    } catch (e) {
+      logger.error('Shopify OAuth callback error:', e.message);
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<h2>Authorization failed.</h2><p>${e.message}</p><p>Please try /shopify login again.</p>`);
+    }
+  });
+  // Shopify app landing page (required for post-install redirect)
+  provider.addRoute('GET', '/shopify/app', async (req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end(`<!DOCTYPE html><html><head><title>Swayat AI - Shopify</title></head><body style="font-family:system-ui;max-width:600px;margin:50px auto;padding:20px;text-align:center"><h1>Swayat AI</h1><p>Your Shopify store is connected to Swayat AI.</p><p>Return to WhatsApp to manage your store with AI.</p></body></html>`);
+  });
+
+  // Shopify mandatory compliance webhooks (GDPR)
+  provider.addRoute('POST', '/shopify/webhooks', async (req, res) => {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      // Verify HMAC signature
+      const hmac = req.headers['x-shopify-hmac-sha256'];
+      if (hmac && config.shopifyClientSecret) {
+        const computed = crypto.createHmac('sha256', config.shopifyClientSecret).update(body, 'utf8').digest('base64');
+        if (hmac !== computed) {
+          logger.warn('Shopify webhook HMAC verification failed');
+          res.writeHead(401);
+          return res.end();
+        }
+      }
+
+      const topic = req.headers['x-shopify-topic'];
+      logger.info(`Shopify webhook received: ${topic}`);
+
+      // Acknowledge — we don't store customer data outside Shopify
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok' }));
+    });
+  });
+
+  logger.info('Shopify integration enabled');
+}
+
 // --- GitHub App install callback ---
 
 const githubAuth = require('./github-auth');
@@ -1292,6 +1422,19 @@ provider.on('message', async (msg) => {
         regData.welcomeSent = true;
       } catch (err) {
         logger.error(`Failed to send welcome to ${senderId}: ${err.message}`);
+      }
+    }
+  }
+
+  // Auto-assign project directory for mapped clients (client-projects registry)
+  if (!isGroup && !msg.fromMe) {
+    const clientProject = clientProjects.getProjectForPhone(senderId);
+    if (clientProject && getProjectDir(chatId) !== clientProject.path) {
+      try {
+        setProjectDir(chatId, clientProject.path);
+        logger.info(`client-projects: auto-assigned "${clientProject.id}" to ${senderId}`);
+      } catch (err) {
+        logger.warn(`client-projects: failed to auto-assign for ${senderId}: ${err.message}`);
       }
     }
   }
@@ -1871,6 +2014,93 @@ provider.on('message', async (msg) => {
 
       // Unknown subcommand — show help
       await botReply(msg, `*Gmail commands:*\n\n\`/gmail\` — Connection status\n\`/gmail login\` — Connect Google account\n\`/gmail logout\` — Disconnect\n\`/gmail send <to> <subject> | <body>\` — Send email\n\`/gmail inbox [query]\` — List/search emails\n\`/gmail read <id>\` — Read an email`);
+      return;
+    }
+
+    // /shopify [status|login|connect|logout] — Shopify integration
+    const shopifyMatch = caption.match(/^\/shopify(?:\s+(.*))?$/is);
+    if (shopifyMatch) {
+      const shopifySenderId = senderId || config.whitelistedNumber;
+      const rawArgs = (shopifyMatch[1] || '').trim();
+      const subcommand = rawArgs.split(/\s+/)[0]?.toLowerCase() || '';
+
+      // /shopify or /shopify status
+      if (!subcommand || subcommand === 'status') {
+        const status = shopifyAuth.getStatus(shopifySenderId);
+        if (status.connected) {
+          await botReply(msg, `*Shopify connected*\n\nStore: *${status.shopName || status.shop}*\nConnected: ${new Date(status.connectedAt).toLocaleDateString()}\n\nJust ask me to manage your products, orders, customers, inventory, or discounts!\n\n\`/shopify logout\` to disconnect.`);
+        } else {
+          await botReply(msg, `*Shopify not connected*\n\nUse \`/shopify connect <shop> <token>\` to connect your store.\n\nExample: \`/shopify connect mystore.myshopify.com shpat_xxxx\`\n\n*How to get your token:*\n1. Go to your Shopify admin\n2. Settings → Apps → Develop apps\n3. Create an app → Configure Admin API scopes\n4. Select all scopes → Save → Install\n5. Copy the Admin API access token`);
+        }
+        return;
+      }
+
+      // /shopify connect <shop> <token> — direct token connection
+      if (subcommand === 'connect') {
+        const parts = rawArgs.replace(/^connect\s*/i, '').trim().split(/\s+/);
+        if (parts.length < 2) {
+          await botReply(msg, `*Connect your Shopify store:*\n\n\`/shopify connect <shop> <token>\`\n\nExample:\n\`/shopify connect mystore.myshopify.com shpat_abc123\`\n\n*How to get your token:*\n1. Go to your Shopify admin → Settings → Apps\n2. Click *Develop apps* → *Allow custom app development*\n3. Click *Create an app* → name it anything\n4. Click *Configure Admin API scopes*\n5. Check these scopes:\n   • read/write products\n   • read/write orders\n   • read/write customers\n   • read/write inventory\n   • read/write discounts\n   • read/write draft orders\n   • read locations\n6. Click *Save* → *Install app*\n7. Copy the *Admin API access token* (starts with shpat\\_)\n8. Send: \`/shopify connect yourstore.myshopify.com shpat_yourtoken\``);
+          return;
+        }
+
+        const shop = shopifyAuth.normalizeShop(parts[0]);
+        const token = parts[1];
+
+        if (!token.startsWith('shpat_')) {
+          await botReply(msg, '❌ Invalid token. The Admin API access token should start with `shpat_`. Check step 7 in the instructions.');
+          return;
+        }
+
+        // Verify the token works
+        await botReply(msg, 'Verifying token...');
+        try {
+          const shopRes = await fetch(`https://${shop}/admin/api/2024-10/shop.json`, {
+            headers: { 'X-Shopify-Access-Token': token },
+          });
+          if (!shopRes.ok) throw new Error(`HTTP ${shopRes.status}`);
+          const shopData = await shopRes.json();
+          const shopName = shopData.shop?.name || shop;
+
+          shopifyAuth.setUserTokens(shopifySenderId, {
+            access_token: token,
+            scope: 'read_products,write_products,read_orders,write_orders,read_customers,write_customers,read_inventory,write_inventory,read_draft_orders,write_draft_orders,read_price_rules,write_price_rules,read_discounts,write_discounts,read_locations',
+            shop,
+            shopName,
+            connectedAt: new Date().toISOString(),
+          });
+
+          await botReply(msg, `*Shopify connected!*\n\nStore: *${shopName}*\nDomain: ${shop}\n\nYou can now:\n• List & manage products\n• View & fulfill orders\n• Search customers\n• Manage inventory\n• Create discount codes\n\nJust ask me in natural language!\n\n\`/shopify logout\` to disconnect.`);
+        } catch (e) {
+          await botReply(msg, `❌ Failed to connect: ${e.message}\n\nMake sure:\n• The shop domain is correct (e.g. mystore.myshopify.com)\n• The token is valid and starts with shpat\\_\n• The app is installed in your Shopify admin`);
+        }
+        return;
+      }
+
+      // /shopify login <shop> — OAuth flow (requires App Store registration)
+      if (subcommand === 'login') {
+        if (!shopifyAuth.isConfigured()) {
+          await botReply(msg, '❌ OAuth login is not available yet.\n\nUse `/shopify connect` instead — it works with any Shopify store.');
+          return;
+        }
+        const shop = rawArgs.replace(/^login\s*/i, '').trim();
+        if (!shop) {
+          await botReply(msg, 'Usage: `/shopify login <shop>`\n\nExamples:\n`/shopify login mystore`\n`/shopify login mystore.myshopify.com`');
+          return;
+        }
+        const authUrl = shopifyAuth.getAuthUrl(shopifySenderId, shop);
+        await botReply(msg, `*Connect Shopify Store*\n\nTap the link below to authorize Swayat to manage your store:\n\n${authUrl}\n\n_You'll be redirected to your Shopify admin to approve access._\n\n_If the link doesn't work, use \`/shopify connect\` instead._`);
+        return;
+      }
+
+      // /shopify logout
+      if (subcommand === 'logout') {
+        shopifyAuth.removeUserTokens(shopifySenderId);
+        await botReply(msg, 'Shopify disconnected. Use `/shopify connect <shop> <token>` to reconnect.');
+        return;
+      }
+
+      // Unknown subcommand
+      await botReply(msg, `*Shopify commands:*\n\n\`/shopify\` — Connection status\n\`/shopify connect <shop> <token>\` — Connect your store\n\`/shopify logout\` — Disconnect`);
       return;
     }
 
@@ -3547,6 +3777,231 @@ const apiServer = http.createServer(async (req, res) => {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));
       }
+    });
+
+  // -- Shopify API endpoints (for Shopify MCP server) --
+
+  } else if (req.method === 'POST' && req.url === '/shopify/shop') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId } = JSON.parse(body);
+        if (!chatId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId required' })); }
+        const shop = await shopifyAuth.getShopInfo(chatId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ shop }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/products') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, limit } = JSON.parse(body);
+        if (!chatId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId required' })); }
+        const products = await shopifyAuth.listProducts(chatId, limit || 20);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ products }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/product') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, productId } = JSON.parse(body);
+        if (!chatId || !productId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId and productId required' })); }
+        const product = await shopifyAuth.getProduct(chatId, productId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ product }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/products/create') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, product } = JSON.parse(body);
+        if (!chatId || !product) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId and product required' })); }
+        const result = await shopifyAuth.createProduct(chatId, product);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'created', ...result }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/products/update') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, productId, product } = JSON.parse(body);
+        if (!chatId || !productId || !product) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId, productId, and product required' })); }
+        const result = await shopifyAuth.updateProduct(chatId, productId, product);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'updated', ...result }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/variants/update') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, variantId, variant } = JSON.parse(body);
+        if (!chatId || !variantId || !variant) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId, variantId, and variant required' })); }
+        const result = await shopifyAuth.updateVariant(chatId, variantId, variant);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'updated', ...result }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/products/delete') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, productId } = JSON.parse(body);
+        if (!chatId || !productId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId and productId required' })); }
+        const result = await shopifyAuth.deleteProduct(chatId, productId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/orders') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, status, limit } = JSON.parse(body);
+        if (!chatId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId required' })); }
+        const orders = await shopifyAuth.listOrders(chatId, status || 'any', limit || 20);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ orders }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/order') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, orderId } = JSON.parse(body);
+        if (!chatId || !orderId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId and orderId required' })); }
+        const order = await shopifyAuth.getOrder(chatId, orderId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ order }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/orders/fulfill') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, orderId, trackingNumber, trackingCompany } = JSON.parse(body);
+        if (!chatId || !orderId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId and orderId required' })); }
+        const result = await shopifyAuth.fulfillOrder(chatId, orderId, trackingNumber, trackingCompany);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'fulfilled', ...result }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/orders/cancel') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, orderId, reason } = JSON.parse(body);
+        if (!chatId || !orderId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId and orderId required' })); }
+        const result = await shopifyAuth.cancelOrder(chatId, orderId, reason);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/customers') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, query, limit } = JSON.parse(body);
+        if (!chatId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId required' })); }
+        const customers = await shopifyAuth.listCustomers(chatId, query || null, limit || 20);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ customers }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/customer') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, customerId } = JSON.parse(body);
+        if (!chatId || !customerId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId and customerId required' })); }
+        const customer = await shopifyAuth.getCustomer(chatId, customerId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ customer }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/locations') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId } = JSON.parse(body);
+        if (!chatId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId required' })); }
+        const locations = await shopifyAuth.listLocations(chatId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ locations }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/inventory/set') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, inventoryItemId, locationId, quantity } = JSON.parse(body);
+        if (!chatId || !inventoryItemId || !locationId || quantity === undefined) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, inventoryItemId, locationId, and quantity required' }));
+        }
+        const result = await shopifyAuth.setInventory(chatId, inventoryItemId, locationId, quantity);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/discounts/create') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, code, valueType, value, title, usageLimit, endsAt } = JSON.parse(body);
+        if (!chatId || !code || !valueType || !value) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, code, valueType, and value required' }));
+        }
+        const result = await shopifyAuth.createDiscount(chatId, { title, code, valueType, value, usageLimit, endsAt });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'created', ...result }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/discounts') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, limit } = JSON.parse(body);
+        if (!chatId) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId required' })); }
+        const discounts = await shopifyAuth.listDiscounts(chatId, limit || 20);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ discounts }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
+    });
+  } else if (req.method === 'POST' && req.url === '/shopify/draft-orders/create') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const { chatId, draftOrder } = JSON.parse(body);
+        if (!chatId || !draftOrder) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'chatId and draftOrder required' })); }
+        const result = await shopifyAuth.createDraftOrder(chatId, draftOrder);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'created', ...result }));
+      } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
     });
 
   } else if (req.method === 'GET' && req.url === '/health') {

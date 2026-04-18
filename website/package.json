@@ -15,6 +15,7 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-square-web-payments-sdk": "^3.2.1",
+    "resend": "^6.10.0",
     "square": "^42.1.0"
   },
   "devDependencies": {

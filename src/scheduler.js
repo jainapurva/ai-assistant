@@ -121,12 +121,18 @@ function registerJob(task) {
       logger.warn(`Scheduled task ${task.id} skipped: could not get provider state: ${e.message}`);
       return;
     }
-    logger.info(`Scheduled task ${task.id} executing: "${task.prompt}"`);
+    logger.info(`Scheduled ${task.type || 'task'} ${task.id} executing: "${task.prompt}"`);
     try {
-      const result = await runClaude(task.prompt, task.chatId);
-      const cleaned = result.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').trim();
       const prefix = `*[Scheduled]* ${task.friendlyInterval || task.cron}\n\n`;
-      await send(task.chatId, prefix + (cleaned || '✅ Done (no text output)'));
+      if (task.type === 'remind') {
+        // Reminder: send the prompt text directly — no Claude API call needed
+        await send(task.chatId, prefix + task.prompt);
+      } else {
+        // Task: run through Claude for intelligent processing
+        const result = await runClaude(task.prompt, task.chatId);
+        const cleaned = result.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').trim();
+        await send(task.chatId, prefix + (cleaned || '✅ Done (no text output)'));
+      }
       updateTaskLastRun(task.id, 'completed');
     } catch (e) {
       logger.error(`Scheduled task ${task.id} failed:`, e.message);
@@ -167,13 +173,14 @@ function init(providerOrClient, sendFn) {
   }
 }
 
-function createSchedule(chatId, cronExpr, prompt, friendlyInterval) {
+function createSchedule(chatId, cronExpr, prompt, friendlyInterval, type) {
   const task = {
     id: generateId(),
     chatId,
     cron: cronExpr,
     friendlyInterval: friendlyInterval || cronExpr,
     prompt,
+    type: type || 'task', // 'task' (run through Claude) or 'remind' (send directly)
     createdAt: Date.now(),
     lastRun: null,
     lastStatus: null,
@@ -225,6 +232,125 @@ function parseScheduleCommand(text) {
   return null;
 }
 
+// ── Schedule/Remind tag parsing (intercept from Claude's output) ──
+
+const SCHEDULE_TAG_REGEX = /<<(?:SCHEDULE|REMIND)\|([^|]+)\|(.+?)>>/g;
+
+/**
+ * Parse time string like "18:00", "6pm", "6:30pm", "6:30 pm"
+ */
+function parseTime(timeStr) {
+  timeStr = timeStr.trim();
+  // 24h: "18:00", "9:00", "0:00"
+  let m = timeStr.match(/^(\d{1,2}):(\d{2})$/);
+  if (m) return { hour: parseInt(m[1], 10), minute: parseInt(m[2], 10) };
+  // 12h: "6pm", "6:30pm", "12am", "6:30 pm"
+  m = timeStr.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i);
+  if (m) {
+    let hour = parseInt(m[1], 10);
+    const minute = m[2] ? parseInt(m[2], 10) : 0;
+    const period = m[3].toLowerCase();
+    if (period === 'pm' && hour !== 12) hour += 12;
+    if (period === 'am' && hour === 12) hour = 0;
+    return { hour, minute };
+  }
+  return null;
+}
+
+function formatTime(hour, minute) {
+  const suffix = hour >= 12 ? 'PM' : 'AM';
+  const h12 = hour % 12 || 12;
+  return `${h12}:${String(minute).padStart(2, '0')} ${suffix}`;
+}
+
+const DAY_MAP = {
+  sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
+  sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
+};
+
+/**
+ * Parse natural time expressions to cron.
+ * Supports: "daily 18:00", "weekdays 9am", "every monday 10:00",
+ *           "every 2h", "every 30m", raw cron "0 18 * * *", "hourly"
+ */
+function parseNaturalTime(expr) {
+  expr = expr.trim();
+  const lower = expr.toLowerCase();
+
+  // Raw cron (5 space-separated fields)
+  const cronParts = expr.split(/\s+/);
+  if (cronParts.length === 5 && cron.validate(expr)) {
+    return { cron: expr, friendly: expr };
+  }
+
+  // Existing friendly interval: "every 30m", "every 2h", "every 1d"
+  const intervalParsed = parseFriendlyInterval(lower);
+  if (intervalParsed) return intervalParsed;
+
+  // "hourly"
+  if (lower === 'hourly') return { cron: '0 * * * *', friendly: 'hourly' };
+
+  // "daily [at] <time>"
+  let match = lower.match(/^daily\s+(?:at\s+)?(.+)$/);
+  if (match) {
+    const time = parseTime(match[1]);
+    if (time) return { cron: `${time.minute} ${time.hour} * * *`, friendly: `daily at ${formatTime(time.hour, time.minute)}` };
+  }
+
+  // "weekdays [at] <time>"
+  match = lower.match(/^weekdays?\s+(?:at\s+)?(.+)$/);
+  if (match) {
+    const time = parseTime(match[1]);
+    if (time) return { cron: `${time.minute} ${time.hour} * * 1-5`, friendly: `weekdays at ${formatTime(time.hour, time.minute)}` };
+  }
+
+  // "weekends [at] <time>"
+  match = lower.match(/^weekends?\s+(?:at\s+)?(.+)$/);
+  if (match) {
+    const time = parseTime(match[1]);
+    if (time) return { cron: `${time.minute} ${time.hour} * * 0,6`, friendly: `weekends at ${formatTime(time.hour, time.minute)}` };
+  }
+
+  // "every <day> [at] <time>"
+  match = lower.match(/^every\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday|sun|mon|tue|wed|thu|fri|sat)\s+(?:at\s+)?(.+)$/);
+  if (match) {
+    const dayNum = DAY_MAP[match[1]];
+    const time = parseTime(match[2]);
+    if (time && dayNum !== undefined) {
+      const dayName = match[1].charAt(0).toUpperCase() + match[1].slice(1);
+      return { cron: `${time.minute} ${time.hour} * * ${dayNum}`, friendly: `every ${dayName} at ${formatTime(time.hour, time.minute)}` };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Extract <<SCHEDULE|...|...>> and <<REMIND|...|...>> tags from Claude's response.
+ * Returns { schedules: [{ type, cron, friendly, prompt }], cleaned: string }
+ */
+function extractScheduleTags(text) {
+  const schedules = [];
+  const cleaned = text.replace(SCHEDULE_TAG_REGEX, (full, timeExpr, prompt) => {
+    const type = full.startsWith('<<REMIND') ? 'remind' : 'task';
+    const parsed = parseNaturalTime(timeExpr.trim());
+    if (parsed) {
+      schedules.push({ type, cron: parsed.cron, friendly: parsed.friendly, prompt: prompt.trim() });
+    } else {
+      logger.warn(`Failed to parse schedule time expression: "${timeExpr}"`);
+    }
+    return '';
+  });
+  return { schedules, cleaned: cleaned.replace(/\n{3,}/g, '\n\n').trim() };
+}
+
+/**
+ * Strip schedule/remind tags from text (for streaming — remove without processing).
+ */
+function stripScheduleTags(text) {
+  return text.replace(SCHEDULE_TAG_REGEX, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 module.exports = {
   init,
   createSchedule,
@@ -232,4 +358,7 @@ module.exports = {
   removeSchedule,
   removeAllSchedules,
   parseScheduleCommand,
+  parseNaturalTime,
+  extractScheduleTags,
+  stripScheduleTags,
 };

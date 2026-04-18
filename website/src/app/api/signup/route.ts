@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
 import { normalizePhone } from "@/lib/phone";
-import { createUser, markWelcomeSent } from "@/lib/db";
+import { getUser, createUser, upgradeUser, markWelcomeSent } from "@/lib/db";
 import { BOT_PHONE_NUMBER, BOT_API_URL } from "@/lib/constants";
+import crypto from "crypto";
+
+function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16);
+  const key = crypto.scryptSync(password, salt, 64);
+  return `${salt.toString("hex")}:${key.toString("hex")}`;
+}
 
 // Map business types to recommended default agents
 const BUSINESS_AGENT_MAP: Record<string, string> = {
@@ -19,7 +26,7 @@ const BUSINESS_AGENT_MAP: Record<string, string> = {
 
 export async function POST(request: Request) {
   try {
-    const { phone, businessType, name, email } = await request.json();
+    const { phone, businessType, name, email, password } = await request.json();
 
     if (!phone || typeof phone !== "string") {
       return NextResponse.json(
@@ -42,6 +49,13 @@ export async function POST(request: Request) {
       );
     }
 
+    if (!password || typeof password !== "string" || password.length < 6) {
+      return NextResponse.json(
+        { success: false, error: "Password must be at least 6 characters" },
+        { status: 400 }
+      );
+    }
+
     const normalized = normalizePhone(phone);
     if (!normalized) {
       return NextResponse.json(
@@ -56,13 +70,39 @@ export async function POST(request: Request) {
 
     // Auto-assign agent based on business type
     const agentId = BUSINESS_AGENT_MAP[businessType] || "business";
+    const passwordHash = hashPassword(password);
+    const emailLower = email.trim().toLowerCase();
 
-    const result = await createUser(normalized, {
-      defaultAgent: agentId,
-      fullName: name.trim(),
-      email: email.trim().toLowerCase(),
-      businessType: businessType || null,
-    });
+    // Check if phone already exists (e.g. user registered via WhatsApp bot)
+    const existing = await getUser(normalized);
+    let result;
+
+    if (existing) {
+      if (existing.password_hash) {
+        // Fully registered — don't allow re-registration
+        return NextResponse.json(
+          { success: false, error: "This phone number is already registered. Please sign in or use forgot password." },
+          { status: 409 }
+        );
+      }
+
+      // Legacy user (from WhatsApp bot) with no password — upgrade their account
+      result = await upgradeUser(normalized, {
+        fullName: name.trim(),
+        email: emailLower,
+        passwordHash,
+        businessType: businessType || null,
+        defaultAgent: agentId,
+      });
+    } else {
+      result = await createUser(normalized, {
+        defaultAgent: agentId,
+        fullName: name.trim(),
+        email: emailLower,
+        businessType: businessType || null,
+        passwordHash,
+      });
+    }
 
     if (!result.success) {
       return NextResponse.json(

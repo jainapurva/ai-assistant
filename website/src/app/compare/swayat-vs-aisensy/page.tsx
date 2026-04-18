@@ -392,10 +392,10 @@ export default function SwayatVsAiSensy() {
             to work.
           </p>
           <a
-            href="/#waitlist"
+            href="/#signup"
             className="mt-8 inline-block rounded-full bg-white px-8 py-3.5 text-lg font-semibold text-primary transition hover:bg-white/90"
           >
-            Join Waitlist Today
+            Get Started Today
           </a>
         </section>
       </main>

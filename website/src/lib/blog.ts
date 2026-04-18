@@ -78,7 +78,7 @@ export const blogPosts: BlogPost[] = [
 </tbody>
 </table>
 
-<p>For real estate agents, <a href="/#waitlist">Swayat AI</a> is purpose-built for this exact use case. It's the only platform that combines true AI intelligence with US-specific real estate features out of the box.</p>
+<p>For real estate agents, <a href="/#signup">Swayat AI</a> is purpose-built for this exact use case. It's the only platform that combines true AI intelligence with US-specific real estate features out of the box.</p>
 
 <h3>Step 2: Set Up Your WhatsApp Business Account</h3>
 
@@ -204,7 +204,7 @@ export const blogPosts: BlogPost[] = [
 
 <p>The real estate agents who adopt AI early will have a massive advantage in lead conversion. While your competitors are still manually responding to leads hours later, your AI will have already qualified the buyer, matched them to properties, and booked a showing.</p>
 
-<p><strong>Ready to transform your real estate business?</strong> <a href="/#waitlist">Join the Swayat AI waitlist</a> &mdash; we're onboarding businesses in small batches to ensure the best experience.</p>
+<p><strong>Ready to transform your real estate business?</strong> <a href="/#signup">Sign up for Swayat AI</a> &mdash; we're onboarding businesses in small batches to ensure the best experience.</p>
 `,
   },
   {
@@ -338,10 +338,10 @@ export const blogPosts: BlogPost[] = [
 
 <h3>Option 2: Through an AI Platform (Recommended)</h3>
 
-<p>Platforms like <a href="/#waitlist">Swayat AI</a> handle the entire API setup for you and add AI-powered automation on top. This is the fastest route to getting an intelligent WhatsApp presence:</p>
+<p>Platforms like <a href="/#signup">Swayat AI</a> handle the entire API setup for you and add AI-powered automation on top. This is the fastest route to getting an intelligent WhatsApp presence:</p>
 
 <ol>
-<li>Join the waitlist on <a href="/#waitlist">swayat.com</a></li>
+<li>Sign up on <a href="/#signup">swayat.com</a></li>
 <li>Connect your WhatsApp number (guided setup, takes 5 minutes)</li>
 <li>The platform handles Meta verification, number registration, and API access</li>
 <li>Configure your AI assistant (choose industry, upload business details)</li>
@@ -428,7 +428,7 @@ export const blogPosts: BlogPost[] = [
 
 <p>The most common mistake small businesses make is staying on the free app too long. If you're missing leads because you can't respond fast enough, losing track of conversations, or spending hours on repetitive messages &mdash; you've already outgrown the app.</p>
 
-<p><strong>Ready to upgrade to the WhatsApp Business API with AI?</strong> <a href="/#waitlist">Join the Swayat AI waitlist</a> &mdash; we're onboarding businesses in small batches.</p>
+<p><strong>Ready to upgrade to the WhatsApp Business API with AI?</strong> <a href="/#signup">Sign up for Swayat AI</a> &mdash; we're onboarding businesses in small batches.</p>
 `,
   },
   {
@@ -645,7 +645,7 @@ export const blogPosts: BlogPost[] = [
 <p>Here's our recommendation based on your situation:</p>
 
 <ul>
-<li><strong>Solo agent, just starting out:</strong> <a href="/#waitlist">Swayat AI</a> (free tier, AI-powered, real estate features built in)</li>
+<li><strong>Solo agent, just starting out:</strong> <a href="/#signup">Swayat AI</a> (free tier, AI-powered, real estate features built in)</li>
 <li><strong>Solo agent, wants budget automation:</strong> AiSensy ($15/month, basic but functional)</li>
 <li><strong>Small team (2-5 agents):</strong> Swayat AI Business plan ($9.99/month) or Interakt ($49/month)</li>
 <li><strong>Medium agency (5-15 agents):</strong> Wati ($49/month, best team inbox)</li>
@@ -655,7 +655,7 @@ export const blogPosts: BlogPost[] = [
 
 <p>The real estate market is increasingly competitive, and the agents who adopt smart tools early will have a significant advantage. WhatsApp automation isn't a luxury anymore &mdash; it's a necessity for any real estate professional handling more than a handful of leads per day.</p>
 
-<p><strong>Want to try AI-powered WhatsApp automation?</strong> <a href="/#waitlist">Join the Swayat AI waitlist</a> and be among the first to get access.</p>
+<p><strong>Want to try AI-powered WhatsApp automation?</strong> <a href="/#signup">Sign up for Swayat AI</a> and be among the first to get access.</p>
 `,
   },
   {
@@ -832,11 +832,11 @@ export const blogPosts: BlogPost[] = [
 <li><strong>Month 2:</strong> Fine-tune based on analytics, add market updates and out-of-state buyer handling.</li>
 </ol>
 
-<p>With a platform like <a href="/#waitlist">Swayat AI</a>, steps 1-3 can be done in a single sitting. The <a href="/features/real-estate">real estate agent tool</a> comes pre-configured with all of these capabilities &mdash; you just need to add your property inventory and availability.</p>
+<p>With a platform like <a href="/#signup">Swayat AI</a>, steps 1-3 can be done in a single sitting. The <a href="/features/real-estate">real estate agent tool</a> comes pre-configured with all of these capabilities &mdash; you just need to add your property inventory and availability.</p>
 
 <p>The agents who adopt AI on WhatsApp today will be the market leaders of tomorrow. While your competitors are still manually typing responses at midnight, your AI will have already qualified the lead, matched them to properties, and booked a showing for Saturday morning.</p>
 
-<p><strong>Ready to close more deals with less effort?</strong> <a href="/#waitlist">Join the Swayat AI waitlist</a> &mdash; we're onboarding real estate professionals now.</p>
+<p><strong>Ready to close more deals with less effort?</strong> <a href="/#signup">Sign up for Swayat AI</a> &mdash; we're onboarding real estate professionals now.</p>
 `,
   },
   {
@@ -1063,7 +1063,361 @@ export const blogPosts: BlogPost[] = [
 
 <p>The transition is usually painless because you're moving to a simpler system, not a more complex one.</p>
 
-<p><strong>Ready to try a WhatsApp-native CRM?</strong> <a href="/#waitlist">Join the Swayat AI waitlist</a> &mdash; we're onboarding businesses in small batches. See how AI-powered lead management on WhatsApp can transform your real estate business.</p>
+<p><strong>Ready to try a WhatsApp-native CRM?</strong> <a href="/#signup">Sign up for Swayat AI</a> &mdash; we're onboarding businesses in small batches. See how AI-powered lead management on WhatsApp can transform your real estate business.</p>
+`,
+  },
+  {
+    slug: "best-wati-alternative-2026",
+    title: "Best Wati Alternative in 2026: Why SMBs Are Switching to AI-First WhatsApp Tools",
+    description:
+      "Looking for a Wati alternative? Compare pricing, features, and ease of use. See why small businesses are choosing AI-powered WhatsApp tools over Wati's flow builders.",
+    date: "2026-04-12",
+    readTime: "9 min read",
+    category: "Comparison",
+    keywords: [
+      "Wati alternative",
+      "Wati alternative cheaper",
+      "best Wati alternative 2026",
+      "WhatsApp business tool cheaper than Wati",
+      "Wati vs Swayat",
+      "Wati pricing too expensive",
+    ],
+    content: `
+<p>Wati is one of the most well-known WhatsApp Business API platforms. It's been around since 2020, it has solid team inbox features, and if you run a support team of 5+ people, it gets the job done. But here's the problem: <strong>most small businesses aren't running 5-person support teams.</strong></p>
+
+<p>If you're a solopreneur, freelancer, or small business owner who landed on Wati and thought "this is way more than I need and way more than I want to pay" &mdash; you're not alone. That's the number one complaint we hear from business owners switching to Swayat AI.</p>
+
+<p>Let's break down what Wati offers, where it falls short for small businesses, and what alternatives actually make sense in 2026.</p>
+
+<h2>What Wati Does Well</h2>
+
+<p>Credit where it's due. Wati is a legit platform with real strengths:</p>
+
+<ul>
+<li><strong>Shared team inbox:</strong> Multiple agents can handle conversations from one number. Great for support teams.</li>
+<li><strong>Broadcast messaging:</strong> Send templated messages to thousands of contacts. Good for marketing blasts.</li>
+<li><strong>Flow builder:</strong> Drag-and-drop chatbot builder for creating automated conversation flows.</li>
+<li><strong>Integrations:</strong> Connects with Shopify, HubSpot, Zoho, and other platforms via Zapier or native integrations.</li>
+</ul>
+
+<p>If you manage a 10-person customer support team and need shared inbox features, Wati is a reasonable choice. But that's a very specific use case.</p>
+
+<h2>Where Wati Falls Short for Small Businesses</h2>
+
+<h3>1. Pricing Starts at $49/Month (No Free Tier)</h3>
+
+<p>Wati's cheapest plan is $49/month. That includes 1,000 conversations and 5 users. If you're a solo business owner who just wants to automate some repetitive tasks on WhatsApp, $49/month for features you won't use is a tough sell.</p>
+
+<p>For context, most small businesses we talk to send fewer than 500 messages per month. Paying $49/month for that is nearly <strong>10 cents per message</strong>.</p>
+
+<h3>2. Flow Builders Aren't AI</h3>
+
+<p>Wati's chatbot builder is a drag-and-drop flow designer. You create decision trees: "If customer says X, reply Y. If they say Z, reply W." This works for simple FAQs but breaks down quickly:</p>
+
+<ul>
+<li>Customers don't speak in keywords. They say "hey can you send me that invoice from last Tuesday" &mdash; a flow builder can't handle that.</li>
+<li>Every new scenario requires building a new flow. Your bot gets more complex and more brittle over time.</li>
+<li>You spend hours building and maintaining flows instead of running your business.</li>
+</ul>
+
+<p>AI-powered tools like Swayat AI understand natural language. You don't build flows. You just talk to it like a person, and it figures out what you need.</p>
+
+<h3>3. It's a Dashboard, Not a Tool</h3>
+
+<p>Wati requires you to log into a web dashboard to manage everything. Set up bots? Dashboard. View analytics? Dashboard. Manage contacts? Dashboard. For business owners who live on their phone, this is friction.</p>
+
+<p>The whole point of WhatsApp is that it's already on your phone. An ideal WhatsApp business tool should work <em>inside</em> WhatsApp, not pull you out of it into another web app.</p>
+
+<h3>4. No Built-In Business Tools</h3>
+
+<p>Wati is a messaging platform. It helps you send and receive WhatsApp messages more efficiently. But it doesn't do invoicing, appointment booking, lead scoring, or marketing &mdash; you need separate tools (and separate subscriptions) for all of those.</p>
+
+<h2>Swayat AI vs. Wati: Side-by-Side</h2>
+
+<table>
+<thead>
+<tr><th>Feature</th><th>Wati</th><th>Swayat AI</th></tr>
+</thead>
+<tbody>
+<tr><td>Starting Price</td><td>$49/month</td><td>Free (100 messages/mo)</td></tr>
+<tr><td>Paid Plan</td><td>$49-$99/month</td><td>$9.99/month</td></tr>
+<tr><td>AI Intelligence</td><td>Rule-based flow builder</td><td>Natural language AI (Claude)</td></tr>
+<tr><td>Setup Time</td><td>Hours to days</td><td>Under 5 minutes</td></tr>
+<tr><td>Invoicing</td><td>Not included</td><td>Built-in</td></tr>
+<tr><td>Appointment Booking</td><td>Not included</td><td>Built-in + Google Calendar sync</td></tr>
+<tr><td>Lead Scoring</td><td>Not included</td><td>Built-in BANT scoring</td></tr>
+<tr><td>Marketing Tools</td><td>Broadcast only</td><td>Social media, email, ad copy, content calendar</td></tr>
+<tr><td>Google Workspace</td><td>Limited</td><td>Gmail, Calendar, Drive, Sheets</td></tr>
+<tr><td>Works Inside WhatsApp</td><td>No (web dashboard)</td><td>Yes &mdash; everything from WhatsApp</td></tr>
+<tr><td>Best For</td><td>Support teams (5+ agents)</td><td>Solopreneurs and small businesses</td></tr>
+</tbody>
+</table>
+
+<h2>Who Should Still Use Wati?</h2>
+
+<p>Wati isn't a bad product. It's just built for a different audience. Stick with Wati if:</p>
+
+<ul>
+<li>You have a <strong>dedicated support team</strong> of 3+ agents who need a shared inbox</li>
+<li>You send <strong>high-volume broadcast campaigns</strong> to thousands of contacts</li>
+<li>You need <strong>Shopify or e-commerce integrations</strong> for order notifications</li>
+<li>You're comfortable managing bots through a <strong>web dashboard</strong></li>
+</ul>
+
+<h2>Who Should Switch to Swayat AI?</h2>
+
+<p>Switch if any of these sound like you:</p>
+
+<ul>
+<li>You're a <strong>solo business owner</strong> or small team (1-3 people)</li>
+<li>You want <strong>AI that understands you</strong>, not a flow builder you have to program</li>
+<li>You need <strong>business tools</strong> (invoicing, booking, CRM) &mdash; not just messaging</li>
+<li>You run your business from your <strong>phone</strong>, not a desktop</li>
+<li>You don't want to pay <strong>$49+/month</strong> for features you don't use</li>
+</ul>
+
+<h2>How to Switch from Wati to Swayat AI</h2>
+
+<ol>
+<li><strong><a href="/#signup">Sign up for free</a></strong> &mdash; no credit card, takes 2 minutes</li>
+<li><strong>Connect your WhatsApp number</strong> &mdash; you can use the same number you used with Wati</li>
+<li><strong>Start talking</strong> &mdash; just message the AI like you'd message a colleague. "Send an invoice to John for $500." "Book a meeting for tomorrow at 3pm." "What leads came in this week?"</li>
+<li><strong>Run both in parallel</strong> for a week if you want &mdash; no pressure to cancel Wati immediately</li>
+</ol>
+
+<p>Most businesses complete the switch in under an hour. There's no data migration, no flow rebuilding, no onboarding calls. You just start using it.</p>
+
+<p><strong>Ready to try a smarter WhatsApp tool?</strong> <a href="/#signup">Start free with Swayat AI</a> and see why small businesses are making the switch.</p>
+`,
+  },
+  {
+    slug: "whatsapp-crm-small-business-free",
+    title: "The Best Free WhatsApp CRM for Small Businesses in 2026",
+    description:
+      "Stop paying $50+/month for CRM tools you barely use. Learn how small businesses are using free WhatsApp-based CRM tools to manage customers, invoices, and appointments from their phone.",
+    date: "2026-04-10",
+    readTime: "8 min read",
+    category: "Small Business",
+    keywords: [
+      "WhatsApp CRM small business",
+      "free WhatsApp CRM",
+      "WhatsApp CRM free",
+      "best CRM for small business 2026",
+      "simple CRM for solopreneurs",
+      "WhatsApp business CRM tool",
+    ],
+    content: `
+<p>Here's a pattern we see constantly: a small business owner signs up for HubSpot, Salesforce, or Zoho. They spend a week setting it up. They use it for a month. Then it slowly dies &mdash; the dashboard goes unopened, contacts go stale, and they're back to managing everything through WhatsApp messages and mental notes.</p>
+
+<p>Sound familiar? You're not lazy. The CRM just wasn't built for how you actually work.</p>
+
+<p>Most CRMs are designed for sales teams at mid-size companies. They assume you have a sales pipeline, a marketing team, a support desk, and someone whose job it is to keep the CRM updated. If you're a solopreneur or a team of 2-3, none of that applies to you.</p>
+
+<p>What you actually need is a CRM that works where you already are: <strong>WhatsApp</strong>.</p>
+
+<h2>Why Traditional CRMs Fail Small Businesses</h2>
+
+<h3>1. Too Many Features, Too Much Friction</h3>
+
+<p>HubSpot has 40+ tools. Salesforce has hundreds of configuration options. Zoho has 50+ apps. For a business owner who just wants to keep track of customers and follow up on time, this is overwhelming. You don't need a marketing automation suite &mdash; you need to remember that Priya wanted a quote by Friday.</p>
+
+<h3>2. Desktop-First in a Phone-First World</h3>
+
+<p>If you run a salon, a restaurant, a freelance practice, or a small shop, you're on your phone 90% of the day. Traditional CRMs are built for desktop browsers. Their mobile apps exist, but they're clunky afterthoughts. You're not going to open the Salesforce app between haircuts to log a customer interaction.</p>
+
+<h3>3. Expensive for What You Get</h3>
+
+<p>HubSpot's paid CRM starts at $20/user/month. Salesforce starts at $25/user/month. Zoho CRM is $14/user/month. These add up fast, especially when you're only using 10% of the features.</p>
+
+<h3>4. Manual Data Entry Kills Adoption</h3>
+
+<p>The #1 reason CRMs get abandoned is manual data entry. Every customer interaction needs to be logged. Every deal stage needs to be updated. Every note needs to be typed in. For busy business owners, this maintenance work is the first thing that gets dropped.</p>
+
+<h2>What a WhatsApp CRM Actually Looks Like</h2>
+
+<p>A WhatsApp CRM isn't a traditional CRM with a WhatsApp plugin bolted on. It's a fundamentally different approach:</p>
+
+<ul>
+<li><strong>Your conversations ARE the CRM.</strong> Every customer interaction happens in WhatsApp. The AI tracks it automatically &mdash; no manual logging.</li>
+<li><strong>You talk instead of clicking.</strong> Instead of navigating a dashboard to create a task, you say "remind me to follow up with John next Tuesday." Done.</li>
+<li><strong>Business tools are built in.</strong> Need to send an invoice? "Send invoice to Sarah for $200 for logo design." Need to book an appointment? "Schedule a call with Mike tomorrow at 2pm." It all happens in the same chat.</li>
+<li><strong>It works on any phone.</strong> No app to download. No desktop required. Works on a $200 Android phone just as well as a $1,500 iPhone.</li>
+</ul>
+
+<h2>Swayat AI: Free WhatsApp CRM for Small Businesses</h2>
+
+<p><a href="/#signup">Swayat AI</a> is built specifically for this use case. It's an AI assistant that lives inside WhatsApp and handles CRM, invoicing, bookings, marketing, and customer support &mdash; all through natural conversation.</p>
+
+<h3>What You Get for Free</h3>
+
+<ul>
+<li><strong>100 messages/month</strong> &mdash; enough to try it out and see if it fits your workflow</li>
+<li><strong>1 business tool</strong> of your choice (invoicing, booking, CRM, marketing, or support)</li>
+<li><strong>Google account connection</strong> &mdash; sync with Gmail, Calendar, Drive</li>
+<li><strong>WhatsApp support</strong> &mdash; help when you need it</li>
+</ul>
+
+<h3>What You Get for $9.99/Month</h3>
+
+<ul>
+<li><strong>2,000 messages/month</strong></li>
+<li><strong>All 7 business tools</strong> unlocked</li>
+<li><strong>Full Google Workspace integration</strong></li>
+<li><strong>Social media publishing</strong></li>
+<li><strong>Email campaign tools</strong></li>
+<li><strong>Priority support</strong></li>
+</ul>
+
+<p>Compare that to $50-$200/month for traditional CRM + invoicing + booking tools separately.</p>
+
+<h2>Real Examples: What You Can Do</h2>
+
+<h3>Freelance Designer</h3>
+<p>"Create invoice for Acme Corp, $2,500 for brand identity package, due in 30 days." The AI generates a professional invoice, tracks payment status, and sends reminders automatically.</p>
+
+<h3>Salon Owner</h3>
+<p>"Book Sarah for a haircut Thursday at 3pm." The AI checks your Google Calendar for conflicts, books the appointment, and sends Sarah a WhatsApp confirmation.</p>
+
+<h3>Real Estate Agent</h3>
+<p>"What hot leads came in this week?" The AI shows your qualified leads, scored by budget and timeline, with follow-up recommendations.</p>
+
+<h3>Consultant</h3>
+<p>"Draft a follow-up email to the client from Monday's meeting. Summarize the three action items we discussed." The AI writes the email and sends it through your Gmail.</p>
+
+<h2>How to Get Started</h2>
+
+<ol>
+<li><strong><a href="/#signup">Sign up free</a></strong> &mdash; takes under 2 minutes, no credit card</li>
+<li><strong>Choose your business tool</strong> &mdash; pick the one you need most (you can add more later)</li>
+<li><strong>Connect Google</strong> &mdash; one tap to sync Calendar, Gmail, and Drive</li>
+<li><strong>Start messaging</strong> &mdash; just tell the AI what you need, in plain English</li>
+</ol>
+
+<p>No setup wizards. No onboarding calls. No dashboard to learn. You'll be productive in your first 5 minutes.</p>
+
+<p><strong>Ready to try a CRM that actually fits how you work?</strong> <a href="/#signup">Start free with Swayat AI</a> &mdash; your WhatsApp-native CRM.</p>
+`,
+  },
+  {
+    slug: "send-invoices-from-whatsapp",
+    title: "How to Send Professional Invoices from WhatsApp in 30 Seconds",
+    description:
+      "Stop switching between apps to invoice your clients. Learn how freelancers and small businesses are creating and sending invoices directly from WhatsApp using AI.",
+    date: "2026-04-08",
+    readTime: "7 min read",
+    category: "Invoicing",
+    keywords: [
+      "send invoice from WhatsApp",
+      "WhatsApp invoice tool",
+      "freelancer invoice WhatsApp",
+      "invoice generator WhatsApp",
+      "WhatsApp invoicing for freelancers",
+      "simple invoice tool small business",
+    ],
+    content: `
+<p>You just finished a project. The client's happy. Now you need to send an invoice. So you open your laptop, log into FreshBooks (or Wave, or QuickBooks, or that Google Sheets template you've been using), fill in the client details, add line items, double-check the tax calculation, generate a PDF, download it, open WhatsApp Web, find the client's chat, attach the PDF, and hit send.</p>
+
+<p>That's 8 steps and 10 minutes for something that should take 30 seconds.</p>
+
+<p>What if you could just type <em>"send invoice to Sarah for $2,500 for brand identity package"</em> into WhatsApp and have a professional invoice generated, calculated, and ready to send &mdash; all without leaving the app?</p>
+
+<p>That's exactly how WhatsApp invoicing works with AI tools in 2026.</p>
+
+<h2>The Problem with Traditional Invoicing</h2>
+
+<p>If you're a freelancer, consultant, or small business owner, you've probably tried at least 3 invoicing tools. Here's why none of them stick:</p>
+
+<h3>1. Context Switching Kills Productivity</h3>
+
+<p>You're on WhatsApp all day talking to clients. Then you have to switch to a completely different app to invoice them. The client confirmed the project on WhatsApp. The scope was discussed on WhatsApp. But the invoice lives somewhere else entirely. This disconnect means invoices get delayed, details get missed, and you lose money.</p>
+
+<h3>2. Most Tools Are Overkill</h3>
+
+<p>FreshBooks costs $17/month. QuickBooks costs $30/month. These are powerful accounting tools with expense tracking, profit/loss reports, tax filing, and payroll features. If you're a freelance designer who sends 10 invoices a month, you're paying for an accounting department you don't need.</p>
+
+<h3>3. Mobile Experience Is an Afterthought</h3>
+
+<p>Try creating an invoice on the FreshBooks mobile app. It works, technically. But it's slow, the forms are tiny, and you'll make mistakes tapping on a small screen. These tools were built for desktop first and squeezed onto mobile later.</p>
+
+<h2>How WhatsApp Invoicing Works</h2>
+
+<p>With an AI-powered WhatsApp tool like <a href="/features/invoicing">Swayat AI</a>, invoicing becomes a conversation:</p>
+
+<p><strong>You:</strong> "Create invoice for Acme Corp, $2,500 for brand identity package, due net 30"</p>
+
+<p><strong>AI:</strong> Creates the invoice with:</p>
+<ul>
+<li>Your business name and details (pre-configured)</li>
+<li>Client: Acme Corp</li>
+<li>Amount: $2,500.00</li>
+<li>Description: Brand identity package</li>
+<li>Due date: 30 days from today</li>
+<li>Sales tax auto-calculated based on your state</li>
+<li>Unique invoice number</li>
+</ul>
+
+<p><strong>You:</strong> "Send it"</p>
+
+<p>Done. The client gets a professional invoice. You get payment tracking and automatic reminders.</p>
+
+<h2>What You Can Do with WhatsApp Invoicing</h2>
+
+<h3>Create Invoices in Plain English</h3>
+<p>No forms. No dropdowns. Just describe what you're billing for:</p>
+<ul>
+<li>"Invoice Mike $800 for 4 hours of consulting at $200/hr"</li>
+<li>"Create invoice: website redesign for Bloom Bakery, $3,500, due in 14 days"</li>
+<li>"Bill the photography client $1,200 for the event shoot"</li>
+</ul>
+
+<h3>Track Payment Status</h3>
+<p>"Which invoices are overdue?" and the AI shows you a list. No logging into a dashboard. No generating reports. Just ask.</p>
+
+<h3>Automatic Payment Reminders</h3>
+<p>Set up reminders and the AI sends polite follow-ups when invoices approach their due date or go overdue. You never have to send an awkward "hey, just following up on that invoice" message again.</p>
+
+<h3>Monthly Revenue Reports</h3>
+<p>"How much did I bill in March?" The AI calculates your monthly revenue, broken down by client, with trends compared to previous months.</p>
+
+<h3>Google Sheets Sync</h3>
+<p>Every invoice automatically syncs to a Google Sheet for your records. Perfect for tax time &mdash; your accountant gets a clean spreadsheet instead of a shoebox of receipts.</p>
+
+<h2>Who This Is For</h2>
+
+<ul>
+<li><strong>Freelancers:</strong> Designers, writers, developers, photographers, videographers</li>
+<li><strong>Consultants:</strong> Business, marketing, HR, legal, financial advisors</li>
+<li><strong>Service providers:</strong> Plumbers, electricians, cleaners, personal trainers, tutors</li>
+<li><strong>Small agencies:</strong> Marketing, design, or development shops with 1-5 people</li>
+<li><strong>Anyone who invoices clients</strong> and is tired of clunky desktop tools</li>
+</ul>
+
+<h2>Pricing Comparison</h2>
+
+<table>
+<thead>
+<tr><th>Tool</th><th>Monthly Cost</th><th>Works on WhatsApp</th><th>AI-Powered</th></tr>
+</thead>
+<tbody>
+<tr><td>FreshBooks</td><td>$17-$55/mo</td><td>No</td><td>No</td></tr>
+<tr><td>QuickBooks</td><td>$30-$200/mo</td><td>No</td><td>No</td></tr>
+<tr><td>Wave</td><td>Free (with ads)</td><td>No</td><td>No</td></tr>
+<tr><td>Zoho Invoice</td><td>$9-$29/mo</td><td>No</td><td>No</td></tr>
+<tr><td>Swayat AI</td><td>Free &mdash; $9.99/mo</td><td>Yes</td><td>Yes</td></tr>
+</tbody>
+</table>
+
+<h2>Get Started in 2 Minutes</h2>
+
+<ol>
+<li><strong><a href="/#signup">Sign up free</a></strong> &mdash; no credit card required</li>
+<li><strong>Tell the AI your business details</strong> &mdash; name, address, tax rate. One-time setup.</li>
+<li><strong>Send your first invoice</strong> &mdash; just type what you're billing for. The AI handles the rest.</li>
+</ol>
+
+<p>Your clients get professional invoices. You get paid faster. And you never have to open another invoicing dashboard again.</p>
+
+<p><strong>Ready to simplify your invoicing?</strong> <a href="/#signup">Try Swayat AI free</a> &mdash; send your first invoice in 30 seconds.</p>
 `,
   },
 ];

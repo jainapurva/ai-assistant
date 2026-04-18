@@ -12,7 +12,7 @@ const tiers = [
       "Google account connection",
       "WhatsApp support",
     ],
-    cta: "Join Waitlist",
+    cta: "Get Started",
     highlight: false,
   },
   {
@@ -28,7 +28,7 @@ const tiers = [
       "Email campaigns",
       "Priority support",
     ],
-    cta: "Join Waitlist",
+    cta: "Get Started",
     highlight: true,
   },
   {
@@ -44,7 +44,7 @@ const tiers = [
       "Custom workflows",
       "Dedicated support",
     ],
-    cta: "Join Waitlist",
+    cta: "Get Started",
     highlight: false,
   },
 ];
@@ -57,7 +57,7 @@ export default function Pricing() {
           Simple, transparent <span className="text-primary">pricing</span>
         </h2>
         <p className="mx-auto mt-4 max-w-lg text-center text-body">
-          Join the waitlist. Upgrade when you&apos;re ready.
+          Start free. Upgrade when you&apos;re ready.
         </p>
 
         {/* Pricing cards */}
@@ -115,7 +115,7 @@ export default function Pricing() {
               </ul>
 
               <a
-                href="#waitlist"
+                href="#signup"
                 className={`mt-8 block rounded-full py-3 text-center text-sm font-semibold transition ${
                   tier.highlight
                     ? "bg-primary text-white hover:bg-primary-dark"
@@ -131,7 +131,7 @@ export default function Pricing() {
         {/* Notes */}
         <p className="mt-10 text-center text-sm text-muted">
           All plans include WhatsApp end-to-end encryption. No credit card
-          required to join the waitlist.
+          required to get started.
         </p>
         <p className="mt-3 text-center text-sm text-body">
           Need more?{" "}

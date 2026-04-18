@@ -72,6 +72,7 @@ export interface User {
   phone: string;
   full_name: string | null;
   email: string | null;
+  password_hash: string | null;
   promo_code_used: string | null;
   trial_expires_at: string | null;
   signup_date: string;
@@ -93,23 +94,77 @@ export async function getUser(phone: string): Promise<User | null> {
   return result.rows[0] || null;
 }
 
+export async function getUserByEmail(email: string): Promise<User | null> {
+  const result = await pool.query<User>(
+    "SELECT * FROM users WHERE LOWER(email) = LOWER($1)",
+    [email]
+  );
+  return result.rows[0] || null;
+}
+
 export async function createUser(
   phone: string,
-  opts: { defaultAgent?: string; fullName?: string; email?: string; businessType?: string } = {}
+  opts: { defaultAgent?: string; fullName?: string; email?: string; businessType?: string; passwordHash?: string } = {}
 ): Promise<{ success: boolean; error?: string; user?: User }> {
   const existing = await getUser(phone);
   if (existing) {
     return { success: false, error: "This phone number is already registered" };
   }
 
+  // Also check email uniqueness
+  if (opts.email) {
+    const emailExists = await getUserByEmail(opts.email);
+    if (emailExists) {
+      return { success: false, error: "This email address is already registered" };
+    }
+  }
+
   const result = await pool.query<User>(
-    `INSERT INTO users (phone, full_name, email, status, subscription_status, default_agent, business_type, welcome_sent)
-     VALUES ($1, $2, $3, 'active', 'active', $4, $5, false)
+    `INSERT INTO users (phone, full_name, email, password_hash, status, subscription_status, default_agent, business_type, welcome_sent)
+     VALUES ($1, $2, $3, $4, 'active', 'active', $5, $6, false)
      RETURNING *`,
-    [phone, opts.fullName || null, opts.email || null, opts.defaultAgent || "business", opts.businessType || null]
+    [phone, opts.fullName || null, opts.email || null, opts.passwordHash || null, opts.defaultAgent || "business", opts.businessType || null]
   );
 
   return { success: true, user: result.rows[0] };
+}
+
+export async function upgradeUser(
+  phone: string,
+  opts: { fullName?: string; email?: string; passwordHash?: string; businessType?: string; defaultAgent?: string }
+): Promise<{ success: boolean; error?: string; user?: User }> {
+  // Check email uniqueness against other users
+  if (opts.email) {
+    const emailUser = await getUserByEmail(opts.email);
+    if (emailUser && emailUser.phone !== phone) {
+      return { success: false, error: "This email address is already registered with a different account" };
+    }
+  }
+
+  const result = await pool.query<User>(
+    `UPDATE users SET
+       full_name = COALESCE($2, full_name),
+       email = COALESCE($3, email),
+       password_hash = COALESCE($4, password_hash),
+       business_type = COALESCE($5, business_type),
+       default_agent = COALESCE($6, default_agent)
+     WHERE phone = $1
+     RETURNING *`,
+    [phone, opts.fullName || null, opts.email || null, opts.passwordHash || null, opts.businessType || null, opts.defaultAgent || null]
+  );
+
+  if (result.rows.length === 0) {
+    return { success: false, error: "User not found" };
+  }
+
+  return { success: true, user: result.rows[0] };
+}
+
+export async function updateUserPassword(email: string, passwordHash: string): Promise<void> {
+  await pool.query(
+    "UPDATE users SET password_hash = $1 WHERE LOWER(email) = LOWER($2)",
+    [passwordHash, email]
+  );
 }
 
 export async function markWelcomeSent(phone: string): Promise<void> {
