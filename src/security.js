@@ -69,8 +69,10 @@ const SECRET_PATTERNS = [
   { label: 'JWT token',          re: /eyJ[A-Za-z0-9+/=]{10,}\.[A-Za-z0-9+/=]{10,}\.[A-Za-z0-9+/=_-]{10,}/g },
   // Generic "password = ..." or "key = ..." followed by long value
   { label: 'credential value',   re: /(?:password|passwd|secret|api[_-]?key|token|credential)\s*[=:]\s*['"]?[A-Za-z0-9+/=_\-!@#$%^&*]{16,}['"]?/gi },
-  // Gmail app passwords: groups of 4 letters (xxxx xxxx xxxx xxxx)
-  { label: 'app password',       re: /\b[a-z]{4}\s[a-z]{4}\s[a-z]{4}\s[a-z]{4}\b/gi },
+  // Gmail app passwords: groups of 4 letters (xxxx xxxx xxxx xxxx).
+  // Only match when preceded by a credential context word — otherwise any four
+  // 4-letter English words (e.g. "go live with real data") would false-positive.
+  { label: 'app password',       re: /(?<=(?:app[-_\s]*password|password|passwd|passcode)(?:\s+is)?\s*[:=]?\s*['"`]?)\b[a-z]{4}\s[a-z]{4}\s[a-z]{4}\s[a-z]{4}\b/gi },
   // Google OAuth access tokens (start with ya29.)
   { label: 'Google OAuth token', re: /ya29\.[A-Za-z0-9_-]{20,}/g },
   // Resend API keys (re_ prefix)

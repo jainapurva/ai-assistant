@@ -112,6 +112,39 @@ describe('filterSensitiveOutput', () => {
     const { redacted } = filterSensitiveOutput('The result is abc123 or key=short');
     expect(redacted).toBe(false);
   });
+
+  test('does not false-positive on four 4-letter English words', () => {
+    const { text, redacted } = filterSensitiveOutput('go live with real data instead of mock data');
+    expect(redacted).toBe(false);
+    expect(text).toContain('go live with real data');
+  });
+
+  test('does not false-positive on prose with four 4-letter words in a row', () => {
+    const inputs = [
+      'have less time than ever',
+      'just take some time over here',
+      'when love made them feel okay',
+    ];
+    for (const input of inputs) {
+      const { redacted } = filterSensitiveOutput(input);
+      expect(redacted).toBe(false);
+    }
+  });
+
+  test('still redacts a Gmail app password when labeled', () => {
+    const cases = [
+      'app password: abcd efgh ijkl mnop',
+      'App Password = abcd efgh ijkl mnop',
+      'password: abcd efgh ijkl mnop',
+      'Your app-password is "abcd efgh ijkl mnop"',
+    ];
+    for (const input of cases) {
+      const { text, redacted, labels } = filterSensitiveOutput(input);
+      expect(redacted).toBe(true);
+      expect(text).not.toContain('abcd efgh ijkl mnop');
+      expect(labels).toContain('app password');
+    }
+  });
 });
 
 describe('sanitizePaths', () => {
