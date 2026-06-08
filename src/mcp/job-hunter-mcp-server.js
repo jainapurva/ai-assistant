@@ -63,7 +63,7 @@ async function botApi(endpoint, payload) {
   if (!BOT_API_URL) throw new Error('BOT_API_URL not configured');
   const res = await fetch(`${BOT_API_URL}${endpoint}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-bot-auth': process.env.INTERNAL_API_TOKEN || '' },
     body: JSON.stringify({ chatId: CHAT_ID, ...payload }),
   });
   if (!res.ok) {

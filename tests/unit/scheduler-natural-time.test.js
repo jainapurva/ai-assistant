@@ -8,7 +8,7 @@ jest.mock('../../src/claude', () => ({
   saveSharedState: jest.fn(),
 }));
 
-const { parseNaturalTime, extractScheduleTags, stripScheduleTags } = require('../../src/scheduler');
+const { parseNaturalTime } = require('../../src/scheduler');
 
 // ── parseNaturalTime ──
 
@@ -131,91 +131,3 @@ describe('parseNaturalTime', () => {
   });
 });
 
-// ── extractScheduleTags ──
-
-describe('extractScheduleTags', () => {
-  test('extracts REMIND tag', () => {
-    const text = 'Done! I\'ll remind you.\n<<REMIND|daily 18:00|Time to exercise!>>';
-    const { schedules, cleaned } = extractScheduleTags(text);
-    expect(schedules).toHaveLength(1);
-    expect(schedules[0].type).toBe('remind');
-    expect(schedules[0].cron).toBe('0 18 * * *');
-    expect(schedules[0].friendly).toBe('daily at 6:00 PM');
-    expect(schedules[0].prompt).toBe('Time to exercise!');
-    expect(cleaned).toBe('Done! I\'ll remind you.');
-  });
-
-  test('extracts SCHEDULE tag', () => {
-    const text = 'I\'ll check your emails!\n<<SCHEDULE|weekdays 9:00|Check emails and summarize>>';
-    const { schedules, cleaned } = extractScheduleTags(text);
-    expect(schedules).toHaveLength(1);
-    expect(schedules[0].type).toBe('task');
-    expect(schedules[0].cron).toBe('0 9 * * 1-5');
-    expect(schedules[0].prompt).toBe('Check emails and summarize');
-    expect(cleaned).toBe('I\'ll check your emails!');
-  });
-
-  test('extracts multiple tags', () => {
-    const text = 'Set up both!\n<<REMIND|daily 8:00|Good morning!>>\n<<SCHEDULE|every 2h|Check server status>>';
-    const { schedules, cleaned } = extractScheduleTags(text);
-    expect(schedules).toHaveLength(2);
-    expect(schedules[0].type).toBe('remind');
-    expect(schedules[0].cron).toBe('0 8 * * *');
-    expect(schedules[1].type).toBe('task');
-    expect(schedules[1].cron).toBe('0 */2 * * *');
-    expect(cleaned).toBe('Set up both!');
-  });
-
-  test('returns text unchanged when no tags', () => {
-    const text = 'Just a normal response with no schedule tags.';
-    const { schedules, cleaned } = extractScheduleTags(text);
-    expect(schedules).toHaveLength(0);
-    expect(cleaned).toBe(text);
-  });
-
-  test('handles invalid time expression gracefully', () => {
-    const text = 'Oops\n<<REMIND|next tuesday maybe|do something>>';
-    const { schedules, cleaned } = extractScheduleTags(text);
-    expect(schedules).toHaveLength(0);
-    expect(cleaned).toBe('Oops');
-  });
-
-  test('collapses excessive newlines after tag removal', () => {
-    const text = 'Hello\n\n\n<<REMIND|daily 9:00|Hi>>\n\n\nGoodbye';
-    const { schedules, cleaned } = extractScheduleTags(text);
-    expect(schedules).toHaveLength(1);
-    expect(cleaned).not.toMatch(/\n{3,}/);
-  });
-});
-
-// ── stripScheduleTags ──
-
-describe('stripScheduleTags', () => {
-  test('strips REMIND tag', () => {
-    const text = 'Hello!\n<<REMIND|daily 18:00|Exercise>>';
-    expect(stripScheduleTags(text)).toBe('Hello!');
-  });
-
-  test('strips SCHEDULE tag', () => {
-    const text = 'Working on it\n<<SCHEDULE|every 1h|check logs>>';
-    expect(stripScheduleTags(text)).toBe('Working on it');
-  });
-
-  test('strips multiple tags', () => {
-    const text = 'Done\n<<REMIND|daily 9:00|Morning>>\n<<SCHEDULE|every 2h|Check>>';
-    expect(stripScheduleTags(text)).toBe('Done');
-  });
-
-  test('returns text unchanged when no tags', () => {
-    const text = 'No tags here';
-    expect(stripScheduleTags(text)).toBe(text);
-  });
-
-  test('handles tag in middle of text', () => {
-    const text = 'Before\n<<REMIND|daily 12:00|Lunch>>\nAfter';
-    const result = stripScheduleTags(text);
-    expect(result).toContain('Before');
-    expect(result).toContain('After');
-    expect(result).not.toContain('REMIND');
-  });
-});

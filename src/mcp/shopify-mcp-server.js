@@ -25,7 +25,7 @@ async function apiCall(endpoint, params) {
 
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-bot-auth': process.env.INTERNAL_API_TOKEN || '' },
     body,
   });
 

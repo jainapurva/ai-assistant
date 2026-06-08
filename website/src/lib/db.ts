@@ -174,6 +174,23 @@ export async function markWelcomeSent(phone: string): Promise<void> {
   );
 }
 
+// --- Email unsubscribe suppression ---
+
+export async function isEmailUnsubscribed(email: string): Promise<boolean> {
+  const result = await pool.query(
+    "SELECT 1 FROM unsubscribed_emails WHERE LOWER(email) = LOWER($1)",
+    [email]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function addUnsubscribedEmail(email: string): Promise<void> {
+  await pool.query(
+    "INSERT INTO unsubscribed_emails (email) VALUES (LOWER($1)) ON CONFLICT (email) DO NOTHING",
+    [email]
+  );
+}
+
 // --- Subscription lookups ---
 
 export async function getUserBySubscriptionId(
@@ -337,6 +354,73 @@ export async function upsertUserAnalytics(
       data.errors || 0,
       data.activityLogHash || null,
       now,
+    ]
+  );
+
+  // Bucket the same delta into today's usage_daily row (UTC) — powers the
+  // admin dashboard's time-series charts (DAU, cost/day, messages/day).
+  await pool.query(
+    `INSERT INTO usage_daily (
+      date, phone, messages_in, messages_out, tasks, completed_tasks,
+      failed_tasks, input_tokens, output_tokens, cache_creation_tokens,
+      cache_read_tokens, cost_usd, duration_secs
+    ) VALUES (
+      (now() AT TIME ZONE 'UTC')::date, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+    )
+    ON CONFLICT (date, phone) DO UPDATE SET
+      messages_in = usage_daily.messages_in + $2,
+      messages_out = usage_daily.messages_out + $3,
+      tasks = usage_daily.tasks + $4,
+      completed_tasks = usage_daily.completed_tasks + $5,
+      failed_tasks = usage_daily.failed_tasks + $6,
+      input_tokens = usage_daily.input_tokens + $7,
+      output_tokens = usage_daily.output_tokens + $8,
+      cache_creation_tokens = usage_daily.cache_creation_tokens + $9,
+      cache_read_tokens = usage_daily.cache_read_tokens + $10,
+      cost_usd = usage_daily.cost_usd + $11,
+      duration_secs = usage_daily.duration_secs + $12`,
+    [
+      phone,
+      data.messagesIn || 0,
+      data.messagesOut || 0,
+      data.tasks || 0,
+      data.completedTasks || 0,
+      data.failedTasks || 0,
+      data.inputTokens || 0,
+      data.outputTokens || 0,
+      data.cacheCreationTokens || 0,
+      data.cacheReadTokens || 0,
+      data.costUsd || 0,
+      data.durationSecs || 0,
+    ]
+  );
+}
+
+// --- Bot health heartbeat (admin dashboard) ---
+
+export async function upsertBotHealth(snapshot: Record<string, unknown>): Promise<void> {
+  await pool.query(
+    `INSERT INTO bot_health (
+      id, reported_at, started_at, uptime_secs, queued_messages,
+      active_tasks, errors_last_hour, meta_token_ok, payload
+    ) VALUES (1, now(), $1, $2, $3, $4, $5, $6, $7)
+    ON CONFLICT (id) DO UPDATE SET
+      reported_at = now(),
+      started_at = $1,
+      uptime_secs = $2,
+      queued_messages = $3,
+      active_tasks = $4,
+      errors_last_hour = $5,
+      meta_token_ok = $6,
+      payload = $7`,
+    [
+      snapshot.startedAt || null,
+      snapshot.uptimeSecs ?? null,
+      snapshot.queuedMessages ?? null,
+      snapshot.activeTasks ?? null,
+      snapshot.errorsLastHour ?? null,
+      snapshot.metaTokenOk ?? null,
+      JSON.stringify(snapshot),
     ]
   );
 }

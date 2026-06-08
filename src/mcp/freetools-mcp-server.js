@@ -33,7 +33,7 @@ async function apiCall(endpoint, params) {
 
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-bot-auth': process.env.INTERNAL_API_TOKEN || '' },
     body,
   });
 
@@ -103,16 +103,18 @@ server.tool(
 
 server.tool(
   'social_publish_now',
-  'Publish a post immediately to one or more connected social media accounts. Always call social_list_accounts first. Use the integer "id" field from those results — NOT the "account_id" string field. For media: use filePath for local workspace files (preferred), or mediaUrl for public URLs.',
+  'Publish a post immediately to one or more connected social media accounts. Always call social_list_accounts first. Use the integer "id" field from those results — NOT the "account_id" string field. For media: use filePath for local workspace files (preferred), or mediaUrl for public URLs. For X/Twitter threads, pass replyToPostId to reply to a specific tweet.',
   {
     accountIds: z.array(z.number().int()).describe('List of integer account IDs from social_list_accounts — use the "id" field (e.g. 23), not "account_id"'),
     caption: z.string().describe('Text content of the post'),
     filePath: z.string().optional().describe('Local workspace file path to attach (e.g. "video.mp4", "image.png"). The bot will make it publicly accessible automatically.'),
     mediaUrl: z.string().optional().describe('Public URL of an image or video to attach (alternative to filePath)'),
     mediaType: z.enum(['IMAGE', 'VIDEO']).optional().describe('Required if filePath or mediaUrl is provided'),
+    replyToPostId: z.string().optional().describe('X/Twitter only: tweet ID to reply to, creating a thread. The new tweet will appear as a reply under the specified tweet.'),
   },
-  toolHandler('/freetools/publish-now', ({ accountIds, caption, filePath, mediaUrl, mediaType }) => ({
+  toolHandler('/freetools/publish-now', ({ accountIds, caption, filePath, mediaUrl, mediaType, replyToPostId }) => ({
     accountIds, caption, filePath: filePath || null, mediaUrl: mediaUrl || null, mediaType: mediaType || null,
+    replyToPostId: replyToPostId || null,
   })),
 );
 

@@ -267,10 +267,11 @@ async function disconnectSocialAccount(chatId, accountId) {
  * @param {string|null} mediaUrl - optional media URL
  * @param {string|null} mediaType - 'IMAGE' | 'VIDEO' | null
  */
-async function publishNow(chatId, accountIds, caption, mediaUrl = null, mediaType = null) {
+async function publishNow(chatId, accountIds, caption, mediaUrl = null, mediaType = null, replyToPostId = null) {
   const body = { social_account_id: accountIds[0], caption };
   if (mediaUrl) body.media_url = mediaUrl;
   if (mediaType) body.media_type = mediaType;
+  if (replyToPostId) body.reply_to_post_id = replyToPostId;
   return apiCall(chatId, 'POST', '/api/posts/publish-now', body);
 }
 

@@ -248,20 +248,26 @@ async function sendEmail(waId, to, subject, body) {
 
 /**
  * List/search emails in the user's inbox.
+ * Supports pagination: pass `pageToken` from a previous call's `nextPageToken`
+ * to fetch the next page. Returns { emails, nextPageToken }.
  */
-async function listEmails(waId, query, maxResults = 10) {
+async function listEmails(waId, query, maxResults = 10, pageToken = null) {
   const client = createAuthenticatedClient(waId);
   if (!client) throw new Error('Google not connected. Use /gmail login first.');
 
   const gmail = google.gmail({ version: 'v1', auth: client });
 
-  const listParams = { userId: 'me', maxResults };
+  // Cap per-call size: each message needs a metadata get, so very large pages
+  // risk Gmail API rate limits. Callers paginate via nextPageToken instead.
+  const listParams = { userId: 'me', maxResults: Math.min(maxResults, 100) };
   if (query) listParams.q = query;
+  if (pageToken) listParams.pageToken = pageToken;
 
   const listResult = await gmail.users.messages.list(listParams);
   const messages = listResult.data.messages || [];
+  const nextPageToken = listResult.data.nextPageToken || null;
 
-  if (messages.length === 0) return [];
+  if (messages.length === 0) return { emails: [], nextPageToken };
 
   const emails = await Promise.all(
     messages.map(async (m) => {
@@ -289,7 +295,7 @@ async function listEmails(waId, query, maxResults = 10) {
     })
   );
 
-  return emails;
+  return { emails, nextPageToken };
 }
 
 /**

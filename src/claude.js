@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const config = require('./config');
+const internalAuth = require('./internal-auth');
 const logger = require('./logger');
 const { filterSensitiveOutput, sanitizePaths, SECURITY_SYSTEM_PROMPT } = require('./security');
 
@@ -24,6 +25,19 @@ const freetoolsAuth = require('./freetools-auth');
 const activity = require('./activity-logger');
 const agents = require('./agents');
 const conversation = require('./conversation-logger');
+const sdkGuard = require('./sdk-guard');
+const bwrapRunner = require('./claude-bwrap-runner');
+
+// Return true if this chat should use the bwrap CLI runner instead of the
+// in-process SDK. Flag/env-driven so cutover is gradual and reversible.
+function shouldUseBwrap(chatId) {
+  if (process.env.BWRAP_CLAUDE === 'true' || process.env.BWRAP_CLAUDE === '1') return true;
+  const allowlist = (process.env.BWRAP_CLAUDE_CHATS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  if (allowlist.length === 0) return false;
+  const bare = String(chatId || '').replace(/@c\.us$/, '');
+  return allowlist.some((c) => c.replace(/@c\.us$/, '') === bare);
+}
 
 // Persistent state file — survives bot restarts
 const STATE_FILE = path.join(config.stateDir, 'bot_state.json');
@@ -61,6 +75,9 @@ const isolatedGroups = new Set();
 // Task persistence for crash recovery
 const pendingTasks = new Map();    // chatId -> task descriptor (in-progress tasks)
 const persistedQueue = new Map();  // chatId -> [queue entries] (waiting messages)
+
+// Heartbeat state: chatId -> { lastUserMessageAt, lastBotMessageAt, lastHeartbeatAt, enabled }
+const heartbeatState = new Map();
 
 // --- Global concurrency limiter for Claude SDK queries ---
 const MAX_CONCURRENT_CLAUDE = 20;
@@ -164,6 +181,11 @@ function loadState() {
         }
         if (persistedQueue.size > 0) logger.info(`Restored queued messages for ${persistedQueue.size} chat(s)`);
       }
+      if (data.heartbeat) {
+        for (const [chatId, entry] of Object.entries(data.heartbeat)) {
+          heartbeatState.set(chatId, entry);
+        }
+      }
     }
   } catch (e) {
     logger.warn('Failed to load state:', e.message);
@@ -173,7 +195,22 @@ function loadState() {
 // Save state to disk
 function saveState() {
   try {
+    // Preserve keys owned by other modules (e.g. scheduler.js writes
+    // `scheduledTasks`). Read the current file and spread it under the
+    // managed keys so unknown top-level keys survive every write.
+    let existing = {};
+    if (fs.existsSync(STATE_FILE)) {
+      try {
+        existing = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+        if (existing === null || typeof existing !== 'object' || Array.isArray(existing)) {
+          existing = {};
+        }
+      } catch {
+        existing = {};
+      }
+    }
     const data = {
+      ...existing,
       projectDirs: Object.fromEntries(projectDirs),
       sessions: Object.fromEntries(sessions),
       chatModels: Object.fromEntries(chatModels),
@@ -184,6 +221,7 @@ function saveState() {
       isolatedGroups: [...isolatedGroups],
       pendingTasks: Object.fromEntries(pendingTasks),
       persistedQueue: Object.fromEntries(persistedQueue),
+      heartbeat: Object.fromEntries(heartbeatState),
     };
     // Atomic write: write to temp file then rename (prevents corruption on crash)
     const tmp = STATE_FILE + '.tmp';
@@ -277,45 +315,11 @@ FORMATTING (CRITICAL \u2014 you're on WhatsApp, not a terminal):
 WORKING STYLE:
 - Act autonomously. Don't ask for permission \u2014 just do the work.
 - Only ask before deleting/removing things.
+- FINISH THE WHOLE JOB IN ONE TURN. If the user asks for a bulk or complete task ("all emails", "the entire list", "every file"), keep working \u2014 loop through every page of results, process every item \u2014 until the task is 100% done, THEN reply once with the final result. NEVER stop partway to ask "want me to keep going?" or "should I continue?" \u2014 the user already told you the goal; asking again forces them to babysit you.
+- Tools that return a nextPageToken/cursor are paginated: keep calling with the token until it's empty. One page is NOT the full dataset.
+- Only check in mid-task if you hit a hard blocker (auth failure, missing data you cannot find) or a destructive/irreversible decision.
 - When you complete a task, briefly confirm what was done.
 - Keep responses concise \u2014 this is WhatsApp, not a terminal.
-
-SCHEDULING & REMINDERS:
-When a user asks to be reminded of something, get notified at a certain time, or set up a recurring task, include a special tag in your response. The system processes this tag automatically \u2014 the user will NOT see it.
-
-For simple reminders (just sends the message text, no AI processing):
-<<REMIND|time_expression|reminder message>>
-
-For tasks that need AI to do something (runs through AI each time):
-<<SCHEDULE|time_expression|task prompt>>
-
-Time expressions you can use:
-\u2022 "daily HH:MM" \u2014 every day at that time (24h format), e.g. "daily 18:00"
-\u2022 "daily H:MMam/pm" \u2014 e.g. "daily 6:00pm"
-\u2022 "weekdays HH:MM" \u2014 Monday through Friday
-\u2022 "weekends HH:MM" \u2014 Saturday and Sunday
-\u2022 "every monday HH:MM" \u2014 a specific day of week (full name: monday, tuesday, etc.)
-\u2022 "every Nh" or "every Nm" \u2014 interval (e.g. "every 2h", "every 30m")
-\u2022 Raw cron for advanced cases: "0 18 * * *"
-
-Rules:
-\u2022 Always place the tag at the END of your message, on its own line.
-\u2022 Always confirm what you set up in your natural language response BEFORE the tag.
-\u2022 Use REMIND for simple reminders/notifications. Use SCHEDULE for tasks that need AI work (e.g. "check my emails", "summarize the news").
-\u2022 The reminder/task prompt should be the actual message or instruction \u2014 not a description of the schedule.
-
-Examples:
-User: "remind me every day at 6pm to exercise"
-\u2192 "Done! I'll remind you every day at 6:00 PM to exercise.
-<<REMIND|daily 18:00|Time to exercise! Stay consistent with your fitness goals \ud83d\udcaa>>"
-
-User: "every weekday at 9am, check my emails and give me a summary"
-\u2192 "All set! I'll check and summarize your emails every weekday morning at 9:00 AM.
-<<SCHEDULE|weekdays 9:00|Check the user's emails and provide a brief summary of important messages>>"
-
-User: "remind me every monday at 10am to submit my timesheet"
-\u2192 "Got it! Weekly reminder set for Monday at 10:00 AM.
-<<REMIND|every monday 10:00|Reminder: Submit your timesheet! Don't forget to log all your hours for last week.>>"
 
 ${SECURITY_SYSTEM_PROMPT}
 `;
@@ -343,6 +347,8 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false, opts = {}
   const mcpServers = {};
   const nodePath = config.nodeBinaryPath;
   const apiUrl = `http://localhost:${config.httpPort}`;
+  // Per-chat token so each MCP server can only call the internal API for THIS chatId.
+  const internalToken = internalAuth.tokenFor(chatId);
 
   // Resend MCP — per-user API key
   const resendApiKey = resendAuth.resolveApiKey(chatId);
@@ -362,7 +368,7 @@ async function runClaude(prompt, chatId, sandboxKey, _isRetry = false, opts = {}
       mcpServers.google = {
         command: nodePath,
         args: [path.resolve(config.mcpServerPath)],
-        env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
+        env: { CHAT_ID: chatId, BOT_API_URL: apiUrl, INTERNAL_API_TOKEN: internalToken },
       };
 
       googlePrompt = `
@@ -394,7 +400,7 @@ NEVER suggest app passwords, SMTP setup, OAuth client creation, or any manual co
       mcpServers.outlook = {
         command: nodePath,
         args: [path.resolve(config.outlookMcpServerPath)],
-        env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
+        env: { CHAT_ID: chatId, BOT_API_URL: apiUrl, INTERNAL_API_TOKEN: internalToken },
       };
 
       outlookPrompt = `
@@ -424,7 +430,7 @@ NEVER suggest app passwords, SMTP setup, or any manual configuration. The built-
       mcpServers.shopify = {
         command: nodePath,
         args: [path.resolve(config.shopifyMcpPath)],
-        env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
+        env: { CHAT_ID: chatId, BOT_API_URL: apiUrl, INTERNAL_API_TOKEN: internalToken },
       };
 
       shopifyPrompt = `
@@ -479,7 +485,7 @@ Example: /shopify login mystore.myshopify.com
     mcpServers.jobhunter = {
       command: nodePath,
       args: [path.resolve(config.jobHunterMcpPath)],
-      env: { TRACKER_PATH: path.join(agentWorkspace, 'tracker.json'), CHAT_ID: chatId, BOT_API_URL: apiUrl },
+      env: { TRACKER_PATH: path.join(agentWorkspace, 'tracker.json'), CHAT_ID: chatId, BOT_API_URL: apiUrl, INTERNAL_API_TOKEN: internalToken },
     };
   }
 
@@ -494,6 +500,7 @@ Example: /shopify login mystore.myshopify.com
         DATA_PATH: path.join(agentWorkspace, 'realestate-data.json'),
         BOT_API_URL: apiUrl,
         CHAT_ID: chatId,
+        INTERNAL_API_TOKEN: internalToken,
         FUB_API_KEY: config.fubApiKey || '',
         MLS_API_URL: config.mlsApiUrl || '',
         MLS_API_TOKEN: config.mlsApiToken || '',
@@ -582,7 +589,7 @@ Do NOT attempt to use Resend tools \u2014 they are not available until the user 
       mcpServers.github = {
         command: nodePath,
         args: [path.resolve(config.githubMcpServerPath)],
-        env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
+        env: { CHAT_ID: chatId, BOT_API_URL: apiUrl, INTERNAL_API_TOKEN: internalToken },
       };
 
       githubPrompt = `
@@ -608,6 +615,69 @@ COMMANDS: /github \u2014 connect GitHub account, /repos \u2014 list repos, /repo
     }
   }
 
+  // Host-Subdomain MCP — deploy a GitHub repo at <sub>.swayat.com (always active)
+  let hostSubdomainPrompt = '';
+  try {
+    mcpServers.hostSubdomain = {
+      command: nodePath,
+      args: [path.resolve(config.hostSubdomainMcpPath)],
+      env: { CHAT_ID: chatId, BOT_API_URL: apiUrl, INTERNAL_API_TOKEN: internalToken, SERVICE_API_SECRET: config.serviceApiSecret || '' },
+    };
+    hostSubdomainPrompt = `
+WEBSITE HOSTING: You have an MCP tool to deploy a user's GitHub repository as a static website at <sub>.swayat.com.
+WHEN TO USE: When the user asks to host, deploy, publish, or put a website online from a GitHub repo.
+TOOL: host_subdomain(repo, sub) — repo is "owner/repo" or full URL; sub is the desired subdomain (lowercase, letters/digits/hyphens).
+
+BUILD-A-WEBSITE FLOW (when the user asks you to BUILD/CREATE a new website, not just host an existing repo):
+1. EARLY in the conversation — before writing any code — ask the user for a subdomain name. Phrase it like: "What should we call it? It'll be live at <name>.swayat.com so you can see it as we build." If they're unsure, suggest 2-3 short options based on the topic they described (e.g. for a sandwich-shop site: "deli", "sandwichbar", "<their-name>-eats"). Pick suggestions that are obviously available-sounding (avoid common words).
+2. As soon as they pick a name, create an initial repo (use the GitHub MCP tools — create a public repo under their connected account with a minimal index.html placeholder that says the site is being built). If they don't have GitHub connected, ask them to run /github first.
+3. Immediately call host_subdomain(repo, sub). The user sees a live URL within ~60s — even before any real content. This is the "see it live while we build" experience.
+4. As you iterate (add pages, styling, content), commit to the same repo and re-call host_subdomain — each call redeploys the latest build to the same subdomain.
+
+WORKFLOW (existing repo, user just wants to host):
+- If the user gives a repo and a subdomain, call host_subdomain immediately. The tool returns within 30-120 seconds; the user gets WhatsApp progress updates during the build.
+- If the subdomain is missing, ask "What subdomain would you like? It will become <sub>.swayat.com." Do NOT default to a guess based on their name without confirmation.
+- If the repo is missing, ask for the GitHub repo (owner/repo or URL).
+- After success, just confirm the URL — the tool already messaged progress.
+
+RULES:
+- Reserved subdomains (www, api, admin, mail, apurva, dhruvil, etc.) are blocked — relay the error verbatim if it occurs.
+- Subdomain ownership is per-WhatsApp-user: a user can only re-deploy to a sub they originally claimed.
+- Only static sites are supported (output must be dist/, build/, or out/ with index.html). Server-rendered apps (Next.js SSR, FastAPI) are not yet supported — say so if the build appears to need a runtime.
+COMMANDS: /host <repo> <sub> — same operation via slash command.
+`;
+  } catch (e) {
+    logger.warn(`Host-Subdomain MCP setup failed: ${e.message}`);
+  }
+
+  // Schedule MCP — unified scheduler (always active)
+  let schedulingPrompt = '';
+  try {
+    mcpServers.schedule = {
+      command: nodePath,
+      args: [path.resolve(config.scheduleMcpPath)],
+      env: { CHAT_ID: chatId, BOT_API_URL: apiUrl, INTERNAL_API_TOKEN: internalToken },
+    };
+    schedulingPrompt = `
+SCHEDULING & REMINDERS: You have MCP tools that durably persist reminders, follow-ups, deadlines, and recurring tasks across conversations. Sessions reset; the schedule store does not.
+ALWAYS call these tools when the user asks to be reminded, sets a deadline, schedules a recurring task, or asks for a follow-up — never just acknowledge verbally without persisting. There is exactly one scheduling backend; both /schedule slash commands and these MCP tools land in the same store.
+TOOLS:
+- schedule_create(when, prompt, type?) — create a schedule.
+  • "when" accepts:
+    – Natural recurrence: "hourly", "daily 6pm", "daily 18:00", "weekdays 9am", "every monday 10:00", "every 30m", "every 2h"
+    – Raw 5-field cron: "0 18 * * *"
+    – One-shot ISO 8601 datetime in user timezone (default America/Los_Angeles): "2026-05-01T15:30:00-07:00" — fires once and is auto-removed.
+  • "prompt" is the actual reminder message (for type="remind") or AI instruction (for type="task").
+  • "type" defaults to "remind" (sends the prompt as a WhatsApp message). Use "task" only when the user wants the AI to do something each time it fires (e.g. "every weekday 9am check my emails and summarize" → type="task").
+- schedule_list() — call when user asks "what reminders do I have?", "my schedules", "what's coming up".
+- schedule_remove(id) — call when user says "cancel that", "stop the weekly X", "never mind".
+- schedule_update(id, when?, prompt?, type?) — edit an existing schedule (e.g. "snooze that to tomorrow", "change the message").
+RESPONSE STYLE: After creating a schedule, briefly confirm in plain language what was saved and when. Don't dump the JSON.
+`;
+  } catch (e) {
+    logger.warn(`Schedule MCP setup failed: ${e.message}`);
+  }
+
   // FreeTools MCP — social media publishing (always active, auto-provisions account)
   let freetoolsPrompt = '';
   try {
@@ -615,7 +685,7 @@ COMMANDS: /github \u2014 connect GitHub account, /repos \u2014 list repos, /repo
     mcpServers.freetools = {
       command: nodePath,
       args: [path.resolve(config.freetoolsMcpPath)],
-      env: { CHAT_ID: chatId, BOT_API_URL: apiUrl },
+      env: { CHAT_ID: chatId, BOT_API_URL: apiUrl, INTERNAL_API_TOKEN: internalToken },
     };
 
     freetoolsPrompt = `
@@ -653,7 +723,7 @@ NEVER force push or rewrite history. Only push to the default branch.
   }
 
   // Build the integration context
-  const integrationContext = realestatePrompt + tradingPrompt + jobHunterPrompt + playwrightPrompt + resendPrompt + googlePrompt + outlookPrompt + shopifyPrompt + githubPrompt + freetoolsPrompt;
+  const integrationContext = realestatePrompt + tradingPrompt + jobHunterPrompt + playwrightPrompt + resendPrompt + googlePrompt + outlookPrompt + shopifyPrompt + githubPrompt + freetoolsPrompt + hostSubdomainPrompt + schedulingPrompt;
 
   // For resumed sessions, prepend integration context to prompt
   // For new sessions, use SDK's systemPrompt option (proper system prompt mechanism)
@@ -715,11 +785,16 @@ NEVER force push or rewrite history. Only push to the default branch.
   // Set up abort controller for /stop support
   const abortController = new AbortController();
 
-  // Build SDK options
+  // Build SDK options.
+  // permissionMode 'default' (not 'bypassPermissions') so canUseTool fires for
+  // Edit/Write/Bash. The canUseTool callback is the app-layer guard preventing
+  // Claude from writing outside the user's cwd or reading secret files; the
+  // real boundary is the systemd unit's InaccessiblePaths/ReadOnlyPaths.
   const sdkOptions = {
     model,
     cwd,
-    permissionMode: 'bypassPermissions',
+    permissionMode: 'default',
+    canUseTool: sdkGuard.createGuard(cwd, chatId),
     abortController,
   };
 
@@ -740,16 +815,56 @@ NEVER force push or rewrite history. Only push to the default branch.
   // Track active query for /stop
   activeQueries.set(chatId, { abortController, startTime: Date.now(), prompt: promptPreview });
 
-  // Timeout handling
+  // Premium ("highest plan") users get no timeout + periodic progress updates.
+  const premium = isPremiumChat(chatId);
+
+  // Timeout handling — skipped entirely for premium users.
   let timeoutTimer = null;
-  if (config.commandTimeoutMs > 0) {
+  let didTimeout = false;
+  if (!premium && config.commandTimeoutMs > 0) {
     timeoutTimer = setTimeout(() => {
+      didTimeout = true;
       abortController.abort();
     }, config.commandTimeoutMs);
   }
 
+  // Periodic "still working" status for premium users on long-running tasks.
+  // lastActivity is updated from the stream loop below so the message is informative.
+  let statusTimer = null;
+  let lastActivity = '⏳ Getting started…';
+  if (premium && typeof opts.onStatus === 'function' && config.premiumStatusIntervalMs > 0) {
+    statusTimer = setInterval(() => {
+      const start = activeQueries.get(chatId)?.startTime || Date.now();
+      const elapsedMin = Math.max(1, Math.round((Date.now() - start) / 60000));
+      Promise.resolve(
+        opts.onStatus(`⏳ Still working — ${elapsedMin} min in.\n${lastActivity}`)
+      ).catch(() => {});
+    }, config.premiumStatusIntervalMs);
+  }
+
+  const cleanupTimers = () => {
+    if (timeoutTimer) { clearTimeout(timeoutTimer); timeoutTimer = null; }
+    if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+  };
+
+  const useBwrap = shouldUseBwrap(chatId);
+  if (useBwrap) {
+    logger.info(`bwrap path: chat=${chatId} model=${model} session=${sessionId || 'new'}`);
+  }
+
   try {
-    const queryHandle = sdkQuery({ prompt: fullPrompt, options: sdkOptions });
+    const queryHandle = useBwrap
+      ? bwrapRunner.runQuery({
+          chatId,
+          sandboxKey: sandboxKey || chatId,
+          prompt: fullPrompt,
+          model,
+          sessionId,
+          systemPrompt,
+          mcpServers,
+          abortController,
+        })
+      : sdkQuery({ prompt: fullPrompt, options: sdkOptions });
 
     let resultText = '';
     let pendingText = '';
@@ -770,6 +885,9 @@ NEVER force push or rewrite history. Only push to the default branch.
           if (block.type === 'text') {
             pendingText += block.text;
             resultText += block.text;
+            if (statusTimer && block.text.trim()) {
+              lastActivity = `📝 ${block.text.trim().slice(0, 140)}`;
+            }
 
             const now = Date.now();
             if (opts.onStream && (now - lastFlushTime > FLUSH_INTERVAL_MS || pendingText.includes('\n\n'))) {
@@ -786,6 +904,15 @@ NEVER force push or rewrite history. Only push to the default branch.
         await opts.onStream(pendingText);
         pendingText = '';
         lastFlushTime = Date.now();
+      }
+
+      // Track current tool for premium progress updates
+      if (statusTimer && message.type === 'assistant' && message.content) {
+        for (const block of message.content) {
+          if (block.type === 'tool_use' && block.name) {
+            lastActivity = `🔧 Running ${block.name}…`;
+          }
+        }
       }
 
       // Final result message
@@ -818,6 +945,9 @@ NEVER force push or rewrite history. Only push to the default branch.
         }
       }
     }
+
+    // Task finished — stop timeout/status timers.
+    cleanupTimers();
 
     // Flush any remaining streamed text
     if (pendingText && opts.onStream) {
@@ -852,13 +982,19 @@ NEVER force push or rewrite history. Only push to the default branch.
     return sanitizePaths(filtered.text);
 
   } catch (err) {
+    cleanupTimers();
     const endTime = Date.now();
     const entry = activeQueries.get(chatId);
     const startTime = entry?.startTime || endTime;
     const durationSecs = Math.round((endTime - startTime) / 1000);
 
-    // Detect user-initiated abort or timeout
+    // Detect abort — distinguish a timeout from a user-initiated /stop so the
+    // caller can show an upgrade prompt on timeout vs. a silent stop.
     if (err.name === 'AbortError' || abortController.signal.aborted) {
+      if (didTimeout) {
+        addTaskHistory(chatId, { prompt: promptPreview, startTime, endTime, durationSecs, tokens: null, status: 'timeout' });
+        throw new Error('TIMED_OUT');
+      }
       addTaskHistory(chatId, { prompt: promptPreview, startTime, endTime, durationSecs, tokens: null, status: 'stopped' });
       throw new Error('STOPPED_BY_USER');
     }
@@ -910,6 +1046,19 @@ function clearSession(chatId) {
   sessions.delete(sessionKey);
   saveState();
   activity.logSession(chatId, { agentId, action: 'reset' });
+}
+
+// Normalise a WhatsApp ID for comparison (strip @c.us / @g.us suffix).
+function _bareId(id) {
+  return String(id || '').replace(/@c\.us$|@g\.us$/, '');
+}
+
+// True if the chat belongs to a premium ("highest plan" / Pro) user.
+// config.premiumChats may list bare or @c.us-suffixed IDs.
+function isPremiumChat(chatId) {
+  if (!chatId) return false;
+  const bare = _bareId(chatId);
+  return (config.premiumChats || []).some(c => _bareId(c) === bare);
 }
 
 // Abort the active SDK query for a chat (user-initiated stop)
@@ -1038,6 +1187,51 @@ function getSubscribedUsers() {
   return [...subscribedUsers];
 }
 
+// ── Heartbeat state helpers ───────────────────────────────────────────────
+
+function _getHeartbeatEntry(chatId) {
+  let entry = heartbeatState.get(chatId);
+  if (!entry) {
+    entry = { lastUserMessageAt: null, lastBotMessageAt: null, lastHeartbeatAt: null, enabled: true };
+    heartbeatState.set(chatId, entry);
+  }
+  return entry;
+}
+
+function recordUserMessage(chatId, ts = Date.now()) {
+  const entry = _getHeartbeatEntry(chatId);
+  entry.lastUserMessageAt = ts;
+  // When the user replies, reset heartbeat cooldown so a fresh window starts
+  entry.lastHeartbeatAt = null;
+  saveState();
+}
+
+function recordBotMessage(chatId, ts = Date.now()) {
+  const entry = _getHeartbeatEntry(chatId);
+  entry.lastBotMessageAt = ts;
+  saveState();
+}
+
+function recordHeartbeatSent(chatId, ts = Date.now()) {
+  const entry = _getHeartbeatEntry(chatId);
+  entry.lastHeartbeatAt = ts;
+  saveState();
+}
+
+function getHeartbeatState(chatId) {
+  return heartbeatState.get(chatId) || null;
+}
+
+function getAllHeartbeatChatIds() {
+  return Array.from(heartbeatState.keys());
+}
+
+function setHeartbeatEnabled(chatId, enabled) {
+  const entry = _getHeartbeatEntry(chatId);
+  entry.enabled = !!enabled;
+  saveState();
+}
+
 // \u2500\u2500 Agent management \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 function getUserAgent(chatId) {
@@ -1119,8 +1313,30 @@ function clearPersistedQueue(chatId) {
   saveState();
 }
 
+// Count of in-flight Claude queries. Used by graceful shutdown.
+function activeQueryCount() {
+  return activeQueries.size;
+}
+
+// Wait until activeQueries drains or maxMs elapses. Resolves with the final
+// count (0 if fully drained). Polls every pollMs and logs progress every 30s.
+async function waitForActiveQueriesToDrain(maxMs = 300000, pollMs = 500) {
+  const start = Date.now();
+  let lastLog = 0;
+  while (activeQueries.size > 0) {
+    const elapsed = Date.now() - start;
+    if (elapsed >= maxMs) break;
+    if (elapsed - lastLog >= 30000) {
+      logger.info(`drain: ${activeQueries.size} active queries, ${Math.round((maxMs - elapsed) / 1000)}s remaining`);
+      lastLog = elapsed;
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  return activeQueries.size;
+}
+
 module.exports = {
-  runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory,
+  runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, isPremiumChat,
   clearSession, setProjectDir, getProjectDir, clearProjectDir,
   setChatModel, getChatModel, clearChatModel,
   loadState, saveState, isGroupChat, STATE_FILE,
@@ -1130,8 +1346,11 @@ module.exports = {
   isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup,
   getSandboxKey,
   getUserAgent, setUserAgent, getAllChatIds,
+  recordUserMessage, recordBotMessage, recordHeartbeatSent,
+  getHeartbeatState, getAllHeartbeatChatIds, setHeartbeatEnabled,
   setPendingTask, clearPendingTask, getPendingTasks,
   setPersistedQueue, getPersistedQueue, clearPersistedQueue,
   clearConversationHistory: conversation.clearHistory,
+  activeQueryCount, waitForActiveQueriesToDrain,
   _setSDKForTesting,
 };

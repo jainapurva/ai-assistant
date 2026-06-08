@@ -113,6 +113,14 @@ describe('MCP server tool handlers', () => {
     expect(result.isError).toBeUndefined();
   });
 
+  test('gmail_inbox forwards pageToken for pagination', async () => {
+    const handler = toolHandler('/gmail/inbox', ({ query, maxResults, pageToken }) => ({ query, maxResults, pageToken }));
+    const result = await handler({ query: 'in:sent', maxResults: 100, pageToken: 'tok-123' });
+
+    expect(lastFetchBody).toEqual({ chatId: 'test-chat-123', query: 'in:sent', maxResults: 100, pageToken: 'tok-123' });
+    expect(result.isError).toBeUndefined();
+  });
+
   test('gmail_inbox works with no optional params', async () => {
     const handler = toolHandler('/gmail/inbox', ({ query, maxResults }) => ({ query, maxResults }));
     const result = await handler({});

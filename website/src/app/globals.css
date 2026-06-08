@@ -1,11 +1,20 @@
 @import "tailwindcss";
 
 @theme {
-  /* Brand / primary */
+  /* Brand / primary — Swayat indigo */
   --color-primary: #6366f1;
   --color-primary-dark: #4f46e5;
-  --color-primary-light: #818cf8;
-  --color-accent: #06b6d4;
+  --color-primary-light: #a5b4fc;
+  --color-indigo-deep: #4338ca;
+  --color-cyan: #06b6d4;
+  --color-accent: #0ea5e9;
+
+  /* Editorial palette */
+  --color-cream: #f4f1ec;
+  --color-paper: #fbf8f3;
+  --color-ink: #0a0a0a;
+  --color-ink-2: #3a3833;
+  --color-stage: #0a0a0a;
 
   /* Surfaces */
   --color-surface: #ffffff;
@@ -43,5 +52,20 @@
   --color-wa-bubble-in: #ffffff;
   --color-wa-input-bg: #f0f0f0;
 
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-roboto), "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-instrument-serif), "Instrument Serif", Georgia, serif;
+}
+
+@layer utilities {
+  .font-serif {
+    font-family: var(--font-serif);
+  }
+  .bg-stage-grid {
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+    background-size: 60px 60px;
+    -webkit-mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
+    mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
+  }
 }

@@ -10,6 +10,14 @@ LOG_DIR="/media/ddarji/storage/ai-assistant"
 
 echo "=== AI Assistant systemd installer ==="
 
+# Hardened unit uses EnvironmentFile=.env — fail fast if it's missing
+ENV_FILE="$LOG_DIR/.env"
+if [[ ! -r "$ENV_FILE" ]]; then
+  echo "[FAIL] $ENV_FILE missing or unreadable — required by EnvironmentFile=" >&2
+  exit 1
+fi
+echo "[OK] $ENV_FILE present"
+
 # Create log directory
 mkdir -p "$LOG_DIR"
 chown ddarji:ddarji "$LOG_DIR"

@@ -5,6 +5,8 @@ const path = require('path');
 const fs = require('fs');
 const BaseProvider = require('./base-provider');
 const logger = require('../logger');
+const internalAuth = require('../internal-auth');
+const healthReporter = require('../health-reporter');
 
 const GRAPH_API_VERSION = 'v21.0';
 const GRAPH_API_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
@@ -96,6 +98,16 @@ class CloudAPIProvider extends BaseProvider {
     } else if (req.method === 'POST' && req.url.startsWith('/webhook')) {
       this._handleWebhook(req, res);
     } else {
+      // Service-to-service routes (website → /setup-agent, /send, …) require a
+      // static x-api-key. OAuth callbacks, /webhook, /shopify/webhooks, OTP, and
+      // browser routes are intentionally left open.
+      if (internalAuth.isServiceProtectedPath(req.url) &&
+          !internalAuth.verifyService(req.headers['x-api-key'])) {
+        logger.warn(`Service API: unauthorized ${req.method} ${req.url} (x-api-key ${req.headers['x-api-key'] ? 'mismatch' : 'missing'})`);
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
       // Check custom routes before returning 404
       for (const route of this._customRoutes) {
         if (req.method === route.method && req.url.startsWith(route.pathPrefix)) {
@@ -566,9 +578,14 @@ class CloudAPIProvider extends BaseProvider {
               const errMsg = parsed.error
                 ? `${parsed.error.message} (code ${parsed.error.code})`
                 : `HTTP ${res.statusCode}`;
+              // Code 190 = invalid/expired access token — surface on the admin dashboard
+              if (parsed.error && parsed.error.code === 190) {
+                healthReporter.recordMetaAuthError();
+              }
               logger.error(`Graph API error: ${errMsg}`);
               reject(new Error(errMsg));
             } else {
+              healthReporter.recordMetaOk();
               resolve(parsed);
             }
           } catch (e) {

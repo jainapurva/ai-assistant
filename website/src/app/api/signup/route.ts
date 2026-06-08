@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { normalizePhone } from "@/lib/phone";
 import { getUser, createUser, upgradeUser, markWelcomeSent } from "@/lib/db";
 import { BOT_PHONE_NUMBER, BOT_API_URL } from "@/lib/constants";
+import { sendWelcomeEmail } from "@/lib/email";
 import crypto from "crypto";
 
 function hashPassword(password: string): string {
@@ -113,53 +114,34 @@ export async function POST(request: Request) {
 
     const chatId = normalized.replace("+", "");
 
-    // Set up agent and send agent-specific welcome via bot API
-    let welcomeSent = false;
+    // Set up agent (the universal welcome template fires below for all agents)
     try {
-      const agentRes = await fetch(`${BOT_API_URL}/setup-agent`, {
+      await fetch(`${BOT_API_URL}/setup-agent`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.SERVICE_API_SECRET || "",
+        },
         body: JSON.stringify({ chatId, agentId }),
       });
-      if (agentRes.ok && agentId !== "business") {
-        // Non-business agents send their own welcome via /setup-agent
-        welcomeSent = true;
-      }
     } catch (err) {
       console.error(`[signup] setup-agent failed for ${chatId}:`, err);
     }
 
-    // Send welcome template for business agent (or if setup-agent didn't send one)
-    if (!welcomeSent) {
-      try {
-        const firstName = name.trim().split(/\s+/)[0];
-        const sendRes = await fetch(`${BOT_API_URL}/send-template`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chatId,
-            template: "swayat_ai_general",
-            language: "en",
-            params: { header: { name: firstName } },
-          }),
-        });
-        if (sendRes.ok) {
-          welcomeSent = true;
-        } else {
-          console.error(`[signup] welcome template returned ${sendRes.status} for ${chatId}`);
-        }
-      } catch (err) {
-        console.error(`[signup] welcome template failed for ${chatId}:`, err);
-      }
-    }
-
-    if (welcomeSent) {
-      await markWelcomeSent(normalized);
-    } else {
-      console.error(`[signup] welcome NOT sent for ${chatId} — welcome_sent remains false`);
-    }
-
+    const firstName = name.trim().split(/\s+/)[0];
     const waLink = `https://wa.me/${BOT_PHONE_NUMBER}?text=Hi`;
+
+    // Welcome WhatsApp template is fired by /setup-agent above; here we only send
+    // the welcome email (in parallel with whatever /setup-agent is still doing).
+    const emailResult = await sendWelcomeEmail(emailLower, firstName, waLink);
+
+    if (!emailResult.success) {
+      console.error(`[signup] welcome email failed for ${emailLower}:`, emailResult.error);
+    }
+
+    // Mark welcome as sent regardless — /setup-agent owns the WA template send,
+    // and email failures shouldn't block onboarding.
+    await markWelcomeSent(normalized);
 
     return NextResponse.json({ success: true, waLink });
   } catch {

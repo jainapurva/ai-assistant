@@ -472,7 +472,7 @@ export default function RealEstatePage() {
                       fill="none"
                       xmlns="http://www.w3.org/2000/svg"
                     >
-                      <rect width="32" height="32" rx="8" fill="#6366f1" />
+                      <rect width="32" height="32" rx="8" fill="#1d4ed8" />
                       <path
                         d="M21 11C21 7 13 7 11 11C9 15 23 17 21 21C19 25 11 25 11 21"
                         stroke="white"

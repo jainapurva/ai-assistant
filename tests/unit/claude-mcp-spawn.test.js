@@ -288,7 +288,10 @@ describe('Claude Agent SDK — query options', () => {
     await runClaude('hello', 'chat-opts', 'chat-opts');
 
     expect(lastQueryCall.options.model).toBe('claude-sonnet-4-6');
-    expect(lastQueryCall.options.permissionMode).toBe('bypassPermissions');
+    // 'default' (not 'bypassPermissions') so the sdk-guard canUseTool fires
+    // on Edit/Write/Bash — see src/sdk-guard.js and the .env incident.
+    expect(lastQueryCall.options.permissionMode).toBe('default');
+    expect(typeof lastQueryCall.options.canUseTool).toBe('function');
   });
 
   test('system prompt included for new sessions', async () => {

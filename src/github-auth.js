@@ -204,6 +204,47 @@ async function handleCallback(code, state, installationId) {
 }
 
 /**
+ * Bind an installation to a WhatsApp user without OAuth code exchange.
+ * Used when setup_action is "update" (or "install" without OAuth-during-install).
+ * Fetches account info via the App JWT so we don't need a user access token.
+ * Returns { waId, account }.
+ */
+async function handleInstallNoCode(state, installationId) {
+  const payload = decryptState(state);
+  if (!payload) {
+    throw new Error('Invalid or expired OAuth state. Please try /github again.');
+  }
+
+  const jwt = generateAppJWT();
+  const res = await fetch(`https://api.github.com/app/installations/${installationId}`, {
+    headers: {
+      'Authorization': `Bearer ${jwt}`,
+      'Accept': 'application/vnd.github+json',
+      'User-Agent': 'Swayat-AI-Assistant',
+    },
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to fetch installation ${installationId}: HTTP ${res.status} ${text.slice(0, 200)}`);
+  }
+
+  const data = await res.json();
+  const account = data.account || {};
+  const installData = {
+    installationId: parseInt(installationId, 10),
+    account: account.login || 'unknown',
+    accountId: account.id,
+    connectedAt: new Date().toISOString(),
+  };
+
+  setInstallation(payload.waId, installData);
+  logger.info(`GitHub bound (no-code path) for ${payload.waId}: ${installData.account} (installation ${installationId})`);
+
+  return { waId: payload.waId, account: installData.account };
+}
+
+/**
  * Generate a short-lived installation access token (valid 1 hour).
  * Never persisted — generated on-demand for each operation.
  */
@@ -517,6 +558,7 @@ module.exports = {
   isConfigured,
   getInstallUrl,
   handleCallback,
+  handleInstallNoCode,
   getInstallation,
   removeInstallation,
   getStatus,

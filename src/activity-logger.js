@@ -284,20 +284,29 @@ function listUsers() {
 
 // ── Database sync ──────────────────────────────────────────────────────────
 
-const ANALYTICS_API_URL = 'https://swayat.com/api/user/analytics';
+// Lazy-required to keep this module dependency-free at load time
+function getConfig() {
+  return require('./config');
+}
 
 /**
  * Send incremental analytics delta to the DB (fire-and-forget).
+ * Authenticated with SERVICE_API_SECRET (x-api-key) — the website rejects
+ * unauthenticated writes.
  */
 function syncToDb(chatId, delta) {
   if (!delta || Object.keys(delta).length === 0) return;
 
+  const config = getConfig();
   const phone = '+' + chatId.replace('@c.us', '').replace('@g.us', '');
   const payload = { phone, activityLogHash: userHash(chatId), ...delta };
 
-  fetch(ANALYTICS_API_URL, {
+  fetch(`${config.analyticsBaseUrl}/api/user/analytics`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': config.serviceApiSecret || '',
+    },
     body: JSON.stringify(payload),
   }).catch(() => {});
 }

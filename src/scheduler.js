@@ -34,6 +34,16 @@ function generateId() {
   return 'sched_' + Math.random().toString(36).slice(2, 10);
 }
 
+// Convert an ISO datetime to a one-shot cron expression that fires once at
+// that exact minute (`minute hour day month *`). Returns null if the date is
+// invalid or already in the past (>1 minute ago — small grace for fire jitter).
+function isoToOneShotCron(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  if (d.getTime() < Date.now() - 60_000) return null;
+  return `${d.getMinutes()} ${d.getHours()} ${d.getDate()} ${d.getMonth() + 1} *`;
+}
+
 // --- State persistence (all tasks in local STATE_FILE) ---
 function loadScheduledTasks() {
   try {
@@ -143,6 +153,13 @@ function registerJob(task) {
       }
       updateTaskLastRun(task.id, 'error');
     }
+    // One-shot: stop and delete after the first fire so it doesn't run again
+    // next month/year when the cron pattern matches (e.g. "30 14 5 6 *").
+    if (task.oneShot) {
+      unregisterJob(task.id);
+      removeScheduledTask(task.id);
+      logger.info(`One-shot task ${task.id} removed after firing`);
+    }
   });
 
   activeJobs.set(task.id, job);
@@ -173,7 +190,7 @@ function init(providerOrClient, sendFn) {
   }
 }
 
-function createSchedule(chatId, cronExpr, prompt, friendlyInterval, type) {
+function createSchedule(chatId, cronExpr, prompt, friendlyInterval, type, opts = {}) {
   const task = {
     id: generateId(),
     chatId,
@@ -181,11 +198,68 @@ function createSchedule(chatId, cronExpr, prompt, friendlyInterval, type) {
     friendlyInterval: friendlyInterval || cronExpr,
     prompt,
     type: type || 'task', // 'task' (run through Claude) or 'remind' (send directly)
+    oneShot: !!opts.oneShot,
     createdAt: Date.now(),
     lastRun: null,
     lastStatus: null,
     enabled: true,
   };
+  saveScheduledTask(task);
+  registerJob(task);
+  return task;
+}
+
+// Resolve a "when" string to a cron expression. Accepts:
+//   - raw 5-field cron ("0 18 * * *")
+//   - natural-language interval ("every 30m", "daily 6pm", "every monday 10:00")
+//   - ISO 8601 datetime → one-shot cron at that minute
+// Returns { cron, friendly, oneShot } or null if it cannot be parsed.
+function resolveWhen(when) {
+  if (!when || typeof when !== 'string') return null;
+  const trimmed = when.trim();
+
+  // Try natural-language / cron forms first.
+  const natural = parseNaturalTime(trimmed);
+  if (natural) return { cron: natural.cron, friendly: natural.friendly, oneShot: false };
+
+  // Fall back to ISO datetime → one-shot cron.
+  if (/^\d{4}-\d{2}-\d{2}[T ]/.test(trimmed)) {
+    const cronExpr = isoToOneShotCron(trimmed);
+    if (cronExpr) {
+      const d = new Date(trimmed);
+      const friendly = d.toLocaleString('en-US', {
+        timeZone: 'America/Los_Angeles',
+        month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+      });
+      return { cron: cronExpr, friendly, oneShot: true };
+    }
+  }
+  return null;
+}
+
+function getSchedule(taskId, chatId) {
+  return loadScheduledTasks().find(t => t.id === taskId && t.chatId === chatId) || null;
+}
+
+function updateSchedule(taskId, chatId, fields) {
+  const task = getSchedule(taskId, chatId);
+  if (!task) return null;
+
+  // Stop the existing job; we'll re-register if still valid.
+  unregisterJob(taskId);
+
+  if (fields.when !== undefined) {
+    const resolved = resolveWhen(fields.when);
+    if (!resolved) return null;
+    task.cron = resolved.cron;
+    task.friendlyInterval = resolved.friendly;
+    task.oneShot = resolved.oneShot;
+  }
+  if (fields.prompt !== undefined) task.prompt = fields.prompt;
+  if (fields.type !== undefined) task.type = fields.type;
+
+  // Persist by removing + re-saving (simplest atomic update).
+  removeScheduledTask(taskId);
   saveScheduledTask(task);
   registerJob(task);
   return task;
@@ -231,10 +305,6 @@ function parseScheduleCommand(text) {
 
   return null;
 }
-
-// ── Schedule/Remind tag parsing (intercept from Claude's output) ──
-
-const SCHEDULE_TAG_REGEX = /<<(?:SCHEDULE|REMIND)\|([^|]+)\|(.+?)>>/g;
 
 /**
  * Parse time string like "18:00", "6pm", "6:30pm", "6:30 pm"
@@ -325,40 +395,16 @@ function parseNaturalTime(expr) {
   return null;
 }
 
-/**
- * Extract <<SCHEDULE|...|...>> and <<REMIND|...|...>> tags from Claude's response.
- * Returns { schedules: [{ type, cron, friendly, prompt }], cleaned: string }
- */
-function extractScheduleTags(text) {
-  const schedules = [];
-  const cleaned = text.replace(SCHEDULE_TAG_REGEX, (full, timeExpr, prompt) => {
-    const type = full.startsWith('<<REMIND') ? 'remind' : 'task';
-    const parsed = parseNaturalTime(timeExpr.trim());
-    if (parsed) {
-      schedules.push({ type, cron: parsed.cron, friendly: parsed.friendly, prompt: prompt.trim() });
-    } else {
-      logger.warn(`Failed to parse schedule time expression: "${timeExpr}"`);
-    }
-    return '';
-  });
-  return { schedules, cleaned: cleaned.replace(/\n{3,}/g, '\n\n').trim() };
-}
-
-/**
- * Strip schedule/remind tags from text (for streaming — remove without processing).
- */
-function stripScheduleTags(text) {
-  return text.replace(SCHEDULE_TAG_REGEX, '').replace(/\n{3,}/g, '\n\n').trim();
-}
-
 module.exports = {
   init,
   createSchedule,
+  getSchedule,
+  updateSchedule,
   listSchedules,
   removeSchedule,
   removeAllSchedules,
   parseScheduleCommand,
   parseNaturalTime,
-  extractScheduleTags,
-  stripScheduleTags,
+  resolveWhen,
+  isoToOneShotCron,
 };

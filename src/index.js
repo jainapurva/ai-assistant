@@ -3,7 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const { createProvider } = require('./providers');
-const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearSession, setProjectDir, getProjectDir, clearProjectDir, setChatModel, getChatModel, clearChatModel, getTokenUsage, resetTokenUsage, isGreeted, markGreeted, isSubscribed, addSubscription, removeSubscription, getSubscribedUsers, isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup, getSandboxKey, getUserAgent, setUserAgent, setPendingTask, clearPendingTask, getPendingTasks, setPersistedQueue, getPersistedQueue, clearPersistedQueue, clearConversationHistory } = require('./claude');
+const claude = require('./claude');
+const { runClaude, stopClaude, isRunning, getRunningInfo, getTaskHistory, clearSession, setProjectDir, getProjectDir, clearProjectDir, setChatModel, getChatModel, clearChatModel, getTokenUsage, resetTokenUsage, isGreeted, markGreeted, isSubscribed, addSubscription, removeSubscription, getSubscribedUsers, isIsolatedGroup, setIsolatedGroup, removeIsolatedGroup, getSandboxKey, getUserAgent, setUserAgent, setPendingTask, clearPendingTask, getPendingTasks, setPersistedQueue, getPersistedQueue, clearPersistedQueue, clearConversationHistory, recordUserMessage, recordBotMessage } = claude;
 const { ensureProfile, getProfile, registerUser, getAllProfiles, formatProfileCard } = require('./profiles');
 const apiCommands = require('./api-commands');
 const drive = require('./drive');
@@ -18,6 +19,8 @@ const { discoverProjects, getProjectSummary } = require('./projects');
 const sandbox = require('./sandbox');
 const scheduler = require('./scheduler');
 const nurtureRunner = require('./nurture-runner');
+const heartbeatRunner = require('./heartbeat-runner');
+const healthReporter = require('./health-reporter');
 const clientProjects = require('./client-projects');
 const logger = require('./logger');
 const chatLogger = require('./chat-logger');
@@ -269,28 +272,25 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
         clearTimeout(workingTimer);
         workingTimer = null;
       }
-      // Strip schedule/remind tags from streamed chunks (processed from full response later)
-      const strippedChunk = scheduler.stripScheduleTags(chunk);
-      if (!strippedChunk) return;
+      if (!chunk) return;
       streamedChunks++;
-      const formatted = markdownToWhatsApp(sanitizePaths(strippedChunk));
+      const formatted = markdownToWhatsApp(sanitizePaths(chunk));
       const msgChunks = chunkMessage(formatted, config.maxChunkSize);
       for (const c of msgChunks) {
         await provider.replyToMessage(msg, c);
       }
     };
 
-    const rawResponse = await runClaude(prompt, chatId, sbKey, false, { useBrowser: !!opts.useBrowser, onStream });
+    // Premium users get periodic "still working" pings on long tasks.
+    const onStatus = async (text) => {
+      if (workingTimer) { clearTimeout(workingTimer); workingTimer = null; }
+      try { await botSendMessage(chatId, text); } catch (e) {}
+    };
+
+    const rawResponse = await runClaude(prompt, chatId, sbKey, false, { useBrowser: !!opts.useBrowser, onStream, onStatus });
     if (workingTimer) clearTimeout(workingTimer);
 
-    // Extract and create any scheduled tasks / reminders from Claude's response
-    const { schedules: newSchedules, cleaned: scheduleStripped } = scheduler.extractScheduleTags(stripAnsi(rawResponse).trim());
-    for (const sched of newSchedules) {
-      const task = scheduler.createSchedule(chatId, sched.cron, sched.prompt, sched.friendly, sched.type);
-      logger.info(`${sched.type === 'remind' ? 'Reminder' : 'Schedule'} created from Claude response: "${sched.prompt}" (${sched.friendly}) [${task.id}]`);
-    }
-
-    const cleaned = scheduleStripped;
+    const cleaned = stripAnsi(rawResponse).trim();
 
     // Detect new files Claude created and send them to the user (sandbox-only)
     // < 10MB → send via WhatsApp directly
@@ -412,6 +412,19 @@ async function handlePrompt(msg, chatId, prompt, mediaPaths, senderName, senderI
       logger.info(`Task stopped by user for chat ${chatId}`);
       chatLogger.logError(logSenderId, chatId, 'Stopped by user');
       activity.logError(chatId, { agentId, error: 'Stopped by user', context: 'task_stop' });
+    } else if (err.message === 'TIMED_OUT') {
+      const mins = Math.round(config.commandTimeoutMs / 60000);
+      logger.info(`Task timed out after ${mins}m for chat ${chatId}`);
+      chatLogger.logError(logSenderId, chatId, `Timed out after ${mins}m`);
+      activity.logError(chatId, { agentId, error: 'timeout', context: 'task_timeout' });
+      try {
+        await botReply(msg,
+          `⏱️ This task hit the ${mins}-minute limit on your current plan, so I had to pause it.\n\n` +
+          `*${config.premiumPlanName}* removes the time limit on long-running tasks and sends you live progress updates while I work.\n\n` +
+          `Upgrade here: ${config.premiumUpgradeUrl}`);
+      } catch (e) {
+        logger.error('Failed to send timeout upsell:', e.message);
+      }
     } else {
       logger.error('Error processing message:', err.message);
       chatLogger.logError(logSenderId, chatId, err.message);
@@ -489,6 +502,7 @@ _Files I create are automatically sent back to you!_
 /github - Connect your GitHub repos
 /repos - List connected repos
 /repo <name> - Set active repo
+/host <repo> <sub> - Host a GitHub repo at <sub>.swayat.com
 /drive - List files uploaded to Google Drive
 /sandbox - Check your workspace status
 /sandbox clean - Clean sandbox workspace
@@ -601,6 +615,39 @@ provider.addRoute('GET', '/media/temp/', (req, res) => {
   }
 });
 
+// --- /host-subdomain route (called by host-subdomain MCP tool) ---
+provider.addRoute('POST', '/host-subdomain', (req, res) => {
+  let body = '';
+  req.on('data', chunk => body += chunk);
+  req.on('end', async () => {
+    try {
+      const { chatId, repo, sub } = JSON.parse(body);
+      if (!chatId || !repo || !sub) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'chatId, repo, and sub are required' }));
+      }
+      const fullChatId = chatId.includes('@') ? chatId : chatId + '@c.us';
+      const { hostSubdomain } = require('./host-subdomain');
+      // Send progress updates back to the user via WhatsApp during build
+      const onProgress = (m) => {
+        provider.sendMessage(fullChatId, sanitizePaths(m)).catch(err => logger.warn(`progress send failed: ${err.message}`));
+      };
+      const result = await hostSubdomain({
+        chatId: fullChatId,
+        repoInput: repo,
+        sub: sub.toLowerCase(),
+        onProgress,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      logger.error(`/host-subdomain failed: ${e.message}`);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  });
+});
+
 // --- /send-template route (sends a WhatsApp template message) ---
 // Must be registered before /send since route matching uses startsWith
 provider.addRoute('POST', '/send-template', (req, res) => {
@@ -667,9 +714,21 @@ provider.addRoute('POST', '/setup-agent', (req, res) => {
       // Set the user's active agent
       setUserAgent(chatId, agent.id);
 
-      // Send agent-specific welcome (or default)
-      if (agent.welcome) {
-        await botSendMessage(chatId, agent.welcome);
+      // Send the WhatsApp utility template `welcome_message_template`.
+      // Required to open the 24h conversation window for users who just signed up
+      // on the website but haven't messaged the bot yet — Meta silently drops
+      // free-form text outside the window. Template body has a {name} parameter.
+      const welcomeLang = process.env.WELCOME_TEMPLATE_LANG || 'en_US';
+      // Populate registration cache so we have the user's name (signup just landed)
+      await isRegistered(chatId).catch(() => {});
+      const regData = getRegistrationData(chatId.replace('@c.us', ''));
+      const firstName = (regData && regData.fullName ? regData.fullName.split(/\s+/)[0] : '') || 'there';
+      try {
+        await provider.sendTemplate(chatId, 'welcome_message_template', welcomeLang, {
+          header: { name: firstName },
+        });
+      } catch (e) {
+        logger.warn(`welcome_message_template send failed for ${chatId}: ${e.message}`);
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1128,20 +1187,25 @@ if (githubAuth.isConfigured()) {
       const installationId = url.searchParams.get('installation_id');
       const setupAction = url.searchParams.get('setup_action');
 
-      if (setupAction === 'install' && !code) {
-        // User installed but no OAuth code — just show success
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end('<h2>GitHub App installed!</h2><p>Return to WhatsApp and use <code>/github</code> to check status.</p>');
-        return;
-      }
+      // DIAGNOSTIC: log every callback so we can see exactly what GitHub sends
+      const allParams = Object.fromEntries(url.searchParams.entries());
+      logger.info(`GitHub callback hit: params=${JSON.stringify(allParams)}`);
 
-      if (!code || !state || !installationId) {
+      // Two valid paths from GitHub:
+      //   1) Full OAuth: code + state + installation_id (when "Request user authorization during installation" is on AND it's a fresh install)
+      //   2) No-code: state + installation_id, no code (when setup_action=update, or OAuth-during-install is off)
+      // We need at minimum state + installation_id to bind the install to a WhatsApp user.
+      if (!state || !installationId) {
+        const missing = [!state && 'state', !installationId && 'installation_id'].filter(Boolean).join(', ');
+        logger.warn(`GitHub callback missing required params: ${missing}. All params: ${JSON.stringify(allParams)}`);
         res.writeHead(400, { 'Content-Type': 'text/html' });
-        res.end('<h2>Missing parameters.</h2><p>Please try <code>/github</code> again in WhatsApp.</p>');
+        res.end(`<h2>Missing parameters.</h2><p>Got: <code>${JSON.stringify(allParams)}</code></p><p>Missing: <b>${missing}</b></p><p>Please try <code>/github</code> again in WhatsApp.</p>`);
         return;
       }
 
-      const result = await githubAuth.handleCallback(code, state, installationId);
+      const result = code
+        ? await githubAuth.handleCallback(code, state, installationId)
+        : await githubAuth.handleInstallNoCode(state, installationId);
 
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(`<h2>GitHub connected!</h2><p>Signed in as <b>${result.account}</b>.</p><p>You can close this window and return to WhatsApp.</p>`);
@@ -1268,7 +1332,7 @@ provider.on('ready', () => {
 
   // Initialize scheduler with provider-based send function
   scheduler.init(provider, async (chatId, text) => {
-    const sentId = await provider.sendMessage(chatId, text);
+    const sentId = await provider.sendMessage(chatId, sanitizePaths(text));
     if (sentId) {
       botSentMessageIds.add(sentId);
       setTimeout(() => botSentMessageIds.delete(sentId), 30000);
@@ -1277,13 +1341,14 @@ provider.on('ready', () => {
 
   // Initialize nurture runner for real estate agent
   const nurtureSendFn = async (chatId, text) => {
-    const sentId = await provider.sendMessage(chatId, text);
+    const sentId = await provider.sendMessage(chatId, sanitizePaths(text));
     if (sentId) {
       botSentMessageIds.add(sentId);
       setTimeout(() => botSentMessageIds.delete(sentId), 30000);
     }
   };
   nurtureRunner.init(nurtureSendFn);
+  heartbeatRunner.init(nurtureSendFn);
 
   // Run nurture cycle every 15 minutes
   const cron = require('node-cron');
@@ -1309,6 +1374,26 @@ provider.on('ready', () => {
       logger.error('[nurture-cron] Error:', err.message);
     }
   });
+
+  // Heartbeat cycle — every 15 min, offset by 5 to avoid piling on top of nurture
+  cron.schedule('5,20,35,50 * * * *', async () => {
+    try {
+      await heartbeatRunner.runHeartbeatCycle();
+    } catch (err) {
+      logger.error('[heartbeat-cron] Error:', err.message);
+    }
+  });
+
+  // Health reporter — push bot heartbeat to the admin dashboard every 5 min
+  healthReporter.init({
+    getQueuedMessages: () => {
+      let total = 0;
+      for (const queue of messageQueue.values()) total += queue.length;
+      return total;
+    },
+    getActiveTasks: () => processing.size,
+  });
+  healthReporter.start();
 
   // Recover interrupted tasks from previous run
   recoverInterruptedTasks();
@@ -1352,6 +1437,11 @@ provider.on('message', async (msg) => {
   const senderIsAdmin = msg.fromMe || isAdmin(senderId);
 
   logger.info(`Message received [${chatId}]: type=${msg.type}, fromMe=${msg.fromMe}, sender=${senderId}, admin=${senderIsAdmin}, caption="${caption.slice(0, 100)}"`);
+
+  // Heartbeat: record every inbound user message so the runner can track idle time
+  if (!msg.fromMe) {
+    try { recordUserMessage(chatId); } catch (e) { logger.warn(`heartbeat recordUserMessage: ${e.message}`); }
+  }
 
   // Group gating: only subscribed users who are admins can interact
   if (isGroup && !msg.fromMe) {
@@ -1808,6 +1898,31 @@ provider.on('message', async (msg) => {
       return;
     }
 
+    // /host <repo> <sub> — build a GitHub repo and deploy at <sub>.swayat.com
+    const hostMatch = caption.match(/^\/host\s+(\S+)\s+(\S+)\s*$/i);
+    if (hostMatch) {
+      const repoInput = hostMatch[1];
+      const sub = hostMatch[2].toLowerCase();
+      await botReply(msg, `🌐 Hosting \`${repoInput}\` at *${sub}.swayat.com*...`);
+      const hostSubdomain = require('./host-subdomain').hostSubdomain;
+      try {
+        const result = await hostSubdomain({
+          chatId,
+          repoInput,
+          sub,
+          onProgress: (m) => { botReply(msg, m).catch(() => {}); },
+        });
+        await botReply(msg, result.message);
+      } catch (e) {
+        await botReply(msg, `❌ /host failed: ${e.message}`);
+      }
+      return;
+    }
+    if (caption.toLowerCase() === '/host' || caption.toLowerCase().startsWith('/host ')) {
+      await botReply(msg, '📖 Usage: `/host <github-repo> <subdomain>`\nExample: `/host owner/repo alice` → https://alice.swayat.com');
+      return;
+    }
+
     // /files — list files in the workspace (sandbox-only for security)
     if (caption.toLowerCase() === '/files') {
       if (!config.sandboxEnabled || !sandbox.isBwrapAvailable()) {
@@ -1973,7 +2088,7 @@ provider.on('message', async (msg) => {
         const query = rawArgs.replace(/^inbox\s*/i, '').trim() || null;
         await botReply(msg, 'Fetching emails...');
         try {
-          const emails = await googleAuth.listEmails(gmailSenderId, query, 10);
+          const { emails } = await googleAuth.listEmails(gmailSenderId, query, 10);
           if (emails.length === 0) {
             await botReply(msg, 'No emails found.');
           } else {
@@ -3027,9 +3142,11 @@ async function getCompanyInfo(company) {
 
 // --- Internal HTTP API for external services (e.g. Shorty trading bot) ---
 const http = require('http');
+const { Readable } = require('stream');
+const internalAuth = require('./internal-auth');
 const INTERNAL_API_PORT = config.httpPort;
 
-const apiServer = http.createServer(async (req, res) => {
+async function dispatchApi(req, res) {
   if (req.method === 'POST' && req.url === '/send') {
     let body = '';
     req.on('data', chunk => body += chunk);
@@ -3071,14 +3188,14 @@ const apiServer = http.createServer(async (req, res) => {
     req.on('data', chunk => body += chunk);
     req.on('end', async () => {
       try {
-        const { chatId, query, maxResults } = JSON.parse(body);
+        const { chatId, query, maxResults, pageToken } = JSON.parse(body);
         if (!chatId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ error: 'chatId required' }));
         }
-        const emails = await googleAuth.listEmails(chatId, query || null, maxResults || 10);
+        const { emails, nextPageToken } = await googleAuth.listEmails(chatId, query || null, maxResults || 10, pageToken || null);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ emails }));
+        res.end(JSON.stringify({ emails, nextPageToken }));
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));
@@ -3691,7 +3808,7 @@ const apiServer = http.createServer(async (req, res) => {
     req.on('data', chunk => body += chunk);
     req.on('end', async () => {
       try {
-        const { chatId, accountIds, caption, mediaUrl, mediaType, filePath } = JSON.parse(body);
+        const { chatId, accountIds, caption, mediaUrl, mediaType, filePath, replyToPostId } = JSON.parse(body);
         if (!chatId || !accountIds || !caption) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           return res.end(JSON.stringify({ error: 'chatId, accountIds, and caption required' }));
@@ -3705,7 +3822,7 @@ const apiServer = http.createServer(async (req, res) => {
             return res.end(JSON.stringify({ error: 'WEBHOOK_BASE_URL not configured or file not found. Cannot serve media for social posts.' }));
           }
         }
-        const result = await freetoolsAuth.publishNow(chatId, accountIds, caption, resolvedMediaUrl, mediaType || null);
+        const result = await freetoolsAuth.publishNow(chatId, accountIds, caption, resolvedMediaUrl, mediaType || null, replyToPostId || null);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (e) {
@@ -4004,6 +4121,134 @@ const apiServer = http.createServer(async (req, res) => {
       } catch (e) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); }
     });
 
+  } else if (req.method === 'POST' && req.url === '/heartbeat/trigger') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const parsed = body ? JSON.parse(body) : {};
+        const { chatId, force } = parsed;
+        if (chatId) {
+          // If force, temporarily lower threshold/cooldown for this invocation
+          const savedThreshold = config.heartbeatThresholdHours;
+          const savedCooldown = config.heartbeatCooldownHours;
+          const savedQuietStart = config.heartbeatQuietStartHour;
+          const savedQuietEnd = config.heartbeatQuietEndHour;
+          if (force) {
+            config.heartbeatThresholdHours = 0;
+            config.heartbeatCooldownHours = 0;
+            config.heartbeatQuietStartHour = 0;
+            config.heartbeatQuietEndHour = 0;
+          }
+          const outcome = await heartbeatRunner.processUser(chatId);
+          if (force) {
+            config.heartbeatThresholdHours = savedThreshold;
+            config.heartbeatCooldownHours = savedCooldown;
+            config.heartbeatQuietStartHour = savedQuietStart;
+            config.heartbeatQuietEndHour = savedQuietEnd;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ chatId, outcome }));
+        }
+        const result = await heartbeatRunner.runHeartbeatCycle();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/schedule/create') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { chatId, when, prompt, type } = JSON.parse(body);
+        if (!chatId || !when || !prompt) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId, when, and prompt required' }));
+        }
+        const resolved = scheduler.resolveWhen(when);
+        if (!resolved) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: `could not parse "when": ${when}` }));
+        }
+        const t = (type === 'remind' || type === 'task') ? type : 'remind';
+        const task = scheduler.createSchedule(chatId, resolved.cron, prompt, resolved.friendly, t, { oneShot: resolved.oneShot });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(task));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/schedule/list') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { chatId } = JSON.parse(body);
+        if (!chatId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId required' }));
+        }
+        const list = scheduler.listSchedules(chatId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ schedules: list }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/schedule/remove') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { chatId, id } = JSON.parse(body);
+        if (!chatId || !id) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId and id required' }));
+        }
+        const existing = scheduler.getSchedule(id, chatId);
+        if (!existing) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'schedule not found' }));
+        }
+        scheduler.removeSchedule(id, chatId);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ removed: id }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.method === 'POST' && req.url === '/schedule/update') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      try {
+        const { chatId, id, when, prompt, type } = JSON.parse(body);
+        if (!chatId || !id) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'chatId and id required' }));
+        }
+        const fields = {};
+        if (when !== undefined) fields.when = when;
+        if (prompt !== undefined) fields.prompt = prompt;
+        if (type !== undefined) fields.type = type;
+        const updated = scheduler.updateSchedule(id, chatId, fields);
+        if (!updated) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'schedule not found or invalid when' }));
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(updated));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
   } else if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok' }));
@@ -4011,10 +4256,47 @@ const apiServer = http.createServer(async (req, res) => {
     res.writeHead(404);
     res.end();
   }
+}
+
+// Auth + body-buffering wrapper. Per-user routes require a per-chat HMAC token
+// (header `x-bot-auth`) matching the body's chatId; everything else passes through.
+// The body is buffered once and replayed into dispatchApi so its existing
+// stream-consuming handlers keep working unchanged.
+const apiServer = http.createServer((req, res) => {
+  const chunks = [];
+  req.on('error', () => { try { res.writeHead(400); res.end(); } catch {} });
+  req.on('data', c => chunks.push(c));
+  req.on('end', () => {
+    const rawBody = Buffer.concat(chunks);
+
+    if (internalAuth.isProtectedPath(req.url)) {
+      let chatId = null;
+      try { chatId = JSON.parse(rawBody.toString('utf8') || '{}').chatId; } catch {}
+      const token = req.headers['x-bot-auth'];
+      if (!internalAuth.verify(chatId, token)) {
+        logger.warn(`Internal API: unauthorized ${req.url} (chatId=${chatId || 'none'}, token=${token ? 'present' : 'missing'})`);
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: 'unauthorized' }));
+      }
+    }
+
+    // Replay the buffered body into the original dispatcher.
+    const replay = Readable.from(rawBody.length ? [rawBody] : []);
+    replay.method = req.method;
+    replay.url = req.url;
+    replay.headers = req.headers;
+    Promise.resolve(dispatchApi(replay, res)).catch(err => {
+      logger.error('dispatchApi error:', err.message);
+      try { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'internal error' })); } catch {}
+    });
+  });
 });
 
-apiServer.listen(INTERNAL_API_PORT, '0.0.0.0', () => {
-  logger.info(`Internal API listening on 0.0.0.0:${INTERNAL_API_PORT}`);
+apiServer.listen(INTERNAL_API_PORT, '127.0.0.1', () => {
+  logger.info(`Internal API listening on 127.0.0.1:${INTERNAL_API_PORT}`);
+  if (!internalAuth.isConfigured()) {
+    logger.warn('INTERNAL_API_SECRET not set — internal API auth is FAILING OPEN. Set it in .env to enforce per-chat access control.');
+  }
   // Write PID file only after both ports bind successfully
   try {
     fs.writeFileSync(PID_FILE, String(process.pid));
@@ -4043,17 +4325,42 @@ process.on('unhandledRejection', (reason) => {
   }
 });
 
-// Graceful shutdown
-async function shutdown() {
-  logger.info('Shutting down...');
+// Graceful shutdown.
+// On SIGTERM/SIGINT: stop accepting new webhook events, wait for in-flight
+// Claude queries to drain (bounded), then exit. systemd unit must set
+// TimeoutStopSec >= drain timeout, else systemd will SIGKILL us mid-drain.
+let shuttingDown = false;
+const SHUTDOWN_DRAIN_MS = parseInt(process.env.SHUTDOWN_DRAIN_MS || '300000', 10);
+async function shutdown(signal = 'SIGTERM') {
+  if (shuttingDown) {
+    logger.warn(`Already shutting down; ignoring ${signal}`);
+    return;
+  }
+  shuttingDown = true;
+  logger.info(`Shutting down (${signal})...`);
+
+  // Stop accepting new HTTP/webhook traffic so no new queries land.
+  try { apiServer.close(); } catch { /* ignore */ }
+  try { await provider.destroy(); } catch (e) { logger.warn(`provider.destroy: ${e.message}`); }
+
+  // Drain in-flight Claude queries (no user message lost mid-stream).
+  const before = claude.activeQueryCount();
+  if (before > 0) {
+    logger.info(`drain: waiting up to ${Math.round(SHUTDOWN_DRAIN_MS / 1000)}s for ${before} active queries`);
+    const remaining = await claude.waitForActiveQueriesToDrain(SHUTDOWN_DRAIN_MS);
+    if (remaining > 0) {
+      logger.warn(`drain: ${remaining} queries still active after timeout — forcing exit`);
+    } else {
+      logger.info('drain: all queries completed');
+    }
+  }
+
   try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
-  sandbox.shutdown();
-  apiServer.close();
-  await provider.destroy();
+  try { sandbox.shutdown(); } catch { /* ignore */ }
   process.exit(0);
 }
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 logger.info('Initializing Cloud API provider...');
 provider.initialize().catch((err) => {

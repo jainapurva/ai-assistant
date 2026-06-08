@@ -14,11 +14,68 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 StandardOutput=append:/media/ddarji/storage/ai-assistant/bot.log
 StandardError=append:/media/ddarji/storage/ai-assistant/bot.log
+
+# Load secrets from .env into the unit's process env BEFORE the namespace
+# is locked down. This means dotenv at config.js:1 is no longer needed —
+# values come from systemd. After this point .env is made invisible at the
+# mount layer (see InaccessiblePaths below) so neither the bot nor any
+# subprocess (including the in-process Claude SDK) can read the file.
+EnvironmentFile=/media/ddarji/storage/ai-assistant/.env
 Environment=NODE_ENV=production
 Environment=PATH=/home/ddarji/.nvm/versions/node/v20.20.0/bin:/home/ddarji/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# === Filesystem isolation (kernel mount namespace) ===
+# These are the actual security boundary against a compromised Claude session.
+# Bugs in src/sdk-guard.js don't matter if the FS namespace makes the targets
+# invisible / read-only.
+
+# .env: removed from the namespace entirely. Vars already loaded via
+# EnvironmentFile above, so the running bot doesn't need the file.
+InaccessiblePaths=/media/ddarji/storage/ai-assistant/.env
+
+# Code, deps, packaging: never written by the running bot. Mark read-only
+# so even if Claude crafts a write past the app-layer guard, it fails EROFS.
+ReadOnlyPaths=/media/ddarji/storage/ai-assistant/src
+ReadOnlyPaths=/media/ddarji/storage/ai-assistant/dist
+ReadOnlyPaths=/media/ddarji/storage/ai-assistant/node_modules
+ReadOnlyPaths=/media/ddarji/storage/ai-assistant/package.json
+ReadOnlyPaths=/media/ddarji/storage/ai-assistant/package-lock.json
+ReadOnlyPaths=/media/ddarji/storage/ai-assistant/tests
+ReadOnlyPaths=/media/ddarji/storage/ai-assistant/scripts
+ReadOnlyPaths=/media/ddarji/storage/ai-assistant/systemd
+ReadOnlyPaths=/media/ddarji/storage/ai-assistant/CLAUDE.md
+
+# Other users' SSH / shell history are out of scope for the bot. Block them
+# at the namespace layer in case Claude's Read guard is bypassed.
+InaccessiblePaths=-/home/ddarji/.ssh
+InaccessiblePaths=-/home/ddarji/.aws
+InaccessiblePaths=-/home/ddarji/.bash_history
+InaccessiblePaths=-/home/ddarji/.zsh_history
+
+# === Standard hardening ===
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+PrivateTmp=true
+PrivateDevices=true
+
 # Resource limits
 LimitNOFILE=65536
 MemoryMax=1G
+
+# Graceful shutdown — give the bot 6 min to drain in-flight Claude queries
+# on SIGTERM before systemd escalates to SIGKILL. SHUTDOWN_DRAIN_MS in the
+# bot defaults to 300000 (5 min); systemd timeout is 60s longer so the bot
+# has time to flush state and exit cleanly after drain completes.
+TimeoutStopSec=360
 
 [Install]
 WantedBy=multi-user.target

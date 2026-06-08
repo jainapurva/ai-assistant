@@ -1,6 +1,22 @@
 import type { Metadata } from "next";
+import { Instrument_Serif, Roboto } from "next/font/google";
 import { GoogleAnalytics } from "@next/third-parties/google";
 import "./globals.css";
+
+const roboto = Roboto({
+  subsets: ["latin"],
+  weight: ["300", "400", "500", "600", "700"],
+  variable: "--font-roboto",
+  display: "swap",
+});
+
+const instrumentSerif = Instrument_Serif({
+  subsets: ["latin"],
+  weight: "400",
+  style: ["normal", "italic"],
+  variable: "--font-instrument-serif",
+  display: "swap",
+});
 
 const siteUrl = "https://swayat.com";
 const title = "Swayat AI — AI Agents That Grow Your Small Business";
@@ -188,7 +204,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="scroll-smooth">
+    <html lang="en" className={`scroll-smooth ${roboto.variable} ${instrumentSerif.variable}`}>
       <head>
         {jsonLd.map((schema, i) => (
           <script
@@ -198,7 +214,7 @@ export default function RootLayout({
           />
         ))}
       </head>
-      <body className="bg-surface text-heading antialiased">{children}</body>
+      <body className="bg-cream text-ink antialiased">{children}</body>
       <GoogleAnalytics gaId="G-6X8242E5S3" />
     </html>
   );

@@ -2096,7 +2096,7 @@ server.tool(
       // Publish via FreeTools — requires connected social accounts
       try {
         const resp = await fetch(`${BOT_API_URL}/freetools/list-accounts`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'x-bot-auth': process.env.INTERNAL_API_TOKEN || '' },
           body: JSON.stringify({ chatId: CHAT_ID }),
         });
         const accounts = await resp.json();
@@ -2105,7 +2105,7 @@ server.tool(
         }
         const accountIds = accounts.accounts.map(a => a.id);
         const pubResp = await fetch(`${BOT_API_URL}/freetools/publish-now`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'x-bot-auth': process.env.INTERNAL_API_TOKEN || '' },
           body: JSON.stringify({ chatId: CHAT_ID, accountIds, caption: content }),
         });
         const result = await pubResp.json();
@@ -2124,7 +2124,7 @@ server.tool(
           const subjectLine = lines.find(l => l.startsWith('Subject:'))?.replace('Subject: ', '') || 'New Property Listing';
           const body = lines.filter(l => !l.startsWith('Subject:')).join('\n').trim();
           await fetch(`${BOT_API_URL}/gmail/send`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'x-bot-auth': process.env.INTERNAL_API_TOKEN || '' },
             body: JSON.stringify({ chatId: CHAT_ID, to: email, subject: subjectLine, body }),
           });
           results.push({ email, sent: true });

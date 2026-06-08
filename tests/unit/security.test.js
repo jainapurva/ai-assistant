@@ -148,11 +148,12 @@ describe('filterSensitiveOutput', () => {
 });
 
 describe('sanitizePaths', () => {
-  test('strips /media/ddarji/storage/ paths', () => {
+  test('strips /media/ddarji/storage/ paths including the project dir name', () => {
     const result = sanitizePaths('File at /media/ddarji/storage/git/ai-assistant/src/index.js');
     expect(result).not.toContain('ddarji');
     expect(result).not.toContain('/media/');
-    expect(result).toContain('git/ai-assistant/src/index.js');
+    expect(result).not.toContain('ai-assistant');
+    expect(result).toContain('src/index.js');
   });
 
   test('strips /home/ddarji/ paths', () => {
@@ -191,6 +192,52 @@ describe('sanitizePaths', () => {
   test('strips multiple paths in same string', () => {
     const result = sanitizePaths('From /home/ddarji/a.txt to /media/ddarji/storage/b.txt');
     expect(result).not.toContain('ddarji');
+  });
+
+  // Regression: the 2026-06-06 Gmail-failure reply leaked the systemd service
+  // name and admin restart instructions to a WhatsApp end user.
+  describe('infrastructure identifiers', () => {
+    test('redacts systemd service name and restart command', () => {
+      const result = sanitizePaths('Restart the bot service — `sudo systemctl restart ai-assistant-bot.service` on the host machine');
+      expect(result).not.toContain('ai-assistant-bot');
+      expect(result).not.toContain('systemctl');
+    });
+
+    test('redacts bare service name without .service suffix', () => {
+      const result = sanitizePaths('check ai-assistant-bot status');
+      expect(result).not.toContain('ai-assistant-bot');
+    });
+
+    test('redacts project/repo folder name', () => {
+      const result = sanitizePaths('The code lives in the ai-assistant repo on GitHub');
+      expect(result).not.toContain('ai-assistant');
+    });
+
+    test('redacts Docker sandbox image and container names', () => {
+      const result = sanitizePaths('Container ai-sandbox-c6b3251655b2 uses image ai-assistant-sandbox:latest');
+      expect(result).not.toContain('ai-sandbox-c6b3251655b2');
+      expect(result).not.toContain('ai-assistant-sandbox');
+    });
+
+    test('redacts host username outside path context', () => {
+      const result = sanitizePaths('running as user ddarji on the host');
+      expect(result).not.toContain('ddarji');
+    });
+
+    test('redacts server IP', () => {
+      const result = sanitizePaths('deployed at 3.238.88.157');
+      expect(result).not.toContain('3.238.88.157');
+    });
+
+    test('redacts internal API endpoints', () => {
+      const result = sanitizePaths('proxies to localhost:5153 and 127.0.0.1:5151');
+      expect(result).not.toContain('5153');
+      expect(result).not.toContain('5151');
+    });
+
+    test('leaves normal user content with ports untouched', () => {
+      expect(sanitizePaths('My site runs on localhost:8080')).toBe('My site runs on localhost:8080');
+    });
   });
 });
 

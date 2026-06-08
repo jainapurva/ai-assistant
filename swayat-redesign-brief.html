@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Swayat.com — redesign brief</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Roboto:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+<style>
+  :root{
+    --ink:#0a0a0a; --ink2:#3a3833; --muted:#8a857c;
+    --cream:#f4f1ec; --paper:#fbf8f3; --line:rgba(15,23,42,0.08);
+    --indigo:#6366f1; --indigo-2:#4338ca; --cyan:#06b6d4;
+    --bg-deep:#0b0a08;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--cream);color:var(--ink);font-family:Roboto,ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1280px;margin:0 auto;padding:64px 48px 120px}
+
+  /* ── doc header ───────────────────────────────────── */
+  .doc-eyebrow{font-size:12px;letter-spacing:.24em;text-transform:uppercase;color:var(--indigo);font-weight:500;display:inline-flex;align-items:center;gap:14px}
+  .doc-eyebrow::before{content:"";display:inline-block;width:32px;height:1px;background:var(--indigo);opacity:.6}
+  .doc-h1{font-family:"Instrument Serif",serif;font-weight:400;font-size:88px;line-height:0.96;letter-spacing:-0.025em;margin:24px 0 0;max-width:920px}
+  .doc-h1 em{font-style:italic;color:var(--ink2)}
+  .doc-sub{margin-top:28px;max-width:640px;font-size:18px;line-height:1.55;color:var(--ink2)}
+  .doc-meta{margin-top:40px;display:flex;gap:32px;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);font-weight:500}
+  .doc-meta b{color:var(--ink);font-weight:500}
+
+  hr.div{border:0;border-top:1px solid var(--line);margin:80px 0}
+
+  /* ── section heading ─────────────────────────────── */
+  .sec-num{font-family:"Instrument Serif",serif;font-style:italic;font-size:64px;color:var(--indigo);line-height:1}
+  .sec-h{font-family:"Instrument Serif",serif;font-weight:400;font-size:48px;line-height:1.02;letter-spacing:-0.02em;margin:8px 0 0}
+  .sec-h em{font-style:italic;color:var(--ink2)}
+  .sec-lede{margin-top:16px;max-width:580px;font-size:16px;line-height:1.6;color:var(--ink2)}
+
+  /* ── before / after cards ────────────────────────── */
+  .ba{display:grid;grid-template-columns:1fr 1.4fr;gap:24px;margin-top:40px}
+  .panel{background:#fff;border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:0 30px 60px -30px rgba(15,23,42,0.12)}
+  .panel-head{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;border-bottom:1px solid var(--line);background:#fbfaf7}
+  .panel-tag{font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted);font-weight:600;display:inline-flex;align-items:center;gap:8px}
+  .panel-tag::before{content:"";width:6px;height:6px;border-radius:999px;background:#cbd5e1}
+  .panel-tag.now::before{background:#f59e0b}
+  .panel-tag.next::before{background:var(--indigo)}
+  .panel-body{padding:0}
+  .panel-foot{padding:16px 20px;border-top:1px solid var(--line);background:#fbfaf7;font-size:12px;color:var(--muted);line-height:1.5}
+
+  /* ── instruction block ───────────────────────────── */
+  .instr{margin-top:32px;background:var(--bg-deep);color:#e9e6e0;border-radius:20px;padding:32px 32px 28px;font-family:Roboto,system-ui,sans-serif;position:relative;overflow:hidden}
+  .instr::before{content:"";position:absolute;inset:0;background:radial-gradient(120% 80% at 0% 0%,rgba(99,102,241,0.20),transparent 60%),radial-gradient(80% 60% at 100% 100%,rgba(6,182,212,0.14),transparent 60%);pointer-events:none}
+  .instr-tag{position:relative;font-size:11px;letter-spacing:.24em;text-transform:uppercase;color:#9ca3af;font-weight:500;display:flex;align-items:center;gap:10px}
+  .instr-tag::before{content:"⌘";color:var(--cyan);font-weight:700;font-size:14px}
+  .instr-h{position:relative;font-family:"Instrument Serif",serif;font-style:italic;font-weight:400;font-size:28px;margin:8px 0 18px;color:#fff}
+  .instr-body{position:relative;font-size:14.5px;line-height:1.65;color:#d4d0c8;font-family:ui-monospace,SF Mono,Menlo,monospace;white-space:pre-wrap}
+  .instr-body b{color:#fff;font-weight:500}
+  .instr-body i{color:#a5b4fc;font-style:normal}
+  .instr-foot{position:relative;margin-top:20px;padding-top:18px;border-top:1px solid rgba(255,255,255,0.08);display:flex;gap:24px;flex-wrap:wrap;font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:#9ca3af;font-weight:500}
+  .instr-foot b{color:#fff;font-weight:500}
+
+  /* ─────── mock 1: header / nav ─────── */
+  .nav-now{padding:0;background:#fff}
+  .nav-now-bar{height:64px;display:flex;align-items:center;justify-content:space-between;padding:0 28px;border-bottom:1px solid #e2e8f0}
+  .nav-logo{display:inline-flex;align-items:center;gap:8px;font-weight:700;font-size:18px;color:var(--ink);letter-spacing:-0.01em}
+  .nav-logo .lm{width:24px;height:24px;border-radius:6px;background:var(--indigo);display:inline-flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:13px}
+  .nav-now-links{display:flex;gap:22px;font-size:13.5px;color:#475569}
+  .nav-now-cta{padding:7px 16px;border-radius:999px;background:var(--indigo);color:#fff;font-size:13px;font-weight:600}
+
+  .nav-next-shell{padding:24px;background:linear-gradient(180deg,#f7f3ec,#f4f1ec)}
+  .nav-next{display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.72);backdrop-filter:blur(20px) saturate(140%);border:1px solid rgba(15,23,42,0.06);border-radius:999px;padding:8px 8px 8px 22px;box-shadow:0 1px 0 rgba(255,255,255,0.6) inset, 0 20px 40px -20px rgba(15,23,42,0.20)}
+  .nav-next-left{display:flex;align-items:center;gap:32px}
+  .nav-next-links{display:flex;gap:22px;font-size:13.5px;color:var(--ink2)}
+  .nav-next-links a{position:relative;cursor:pointer}
+  .nav-next-links a:hover{color:var(--ink)}
+  .nav-next-links .has{display:inline-flex;align-items:center;gap:5px}
+  .nav-next-links .has::after{content:"";width:5px;height:5px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg) translateY(-1px)}
+  .nav-next-right{display:flex;align-items:center;gap:6px}
+  .nav-next-ghost{padding:9px 16px;font-size:13px;color:var(--ink2);font-weight:500;border-radius:999px}
+  .nav-next-ghost:hover{background:rgba(15,23,42,0.05)}
+  .nav-next-cta{padding:10px 18px;border-radius:999px;background:var(--ink);color:#fff;font-size:13px;font-weight:600;display:inline-flex;align-items:center;gap:8px}
+  .nav-next-cta::after{content:"→"}
+
+  /* ─────── mock 2: video showcase ─────── */
+  .vid-now{padding:36px 28px;background:#fff;display:flex;flex-direction:column;align-items:center;gap:20px}
+  .vid-now-frame{width:100%;aspect-ratio:16/10;background:linear-gradient(135deg,#1e293b,#0f172a);border-radius:8px;display:flex;align-items:center;justify-content:center;color:#475569;font-size:13px;letter-spacing:.18em;text-transform:uppercase}
+  .vid-now-cta{padding:12px 24px;border-radius:999px;background:var(--indigo);color:#fff;font-size:14px;font-weight:600}
+
+  .vid-next{position:relative;background:#0a0a0a;color:#fff;padding:48px 36px 56px;overflow:hidden}
+  .vid-next::before{content:"";position:absolute;top:-200px;left:-100px;width:520px;height:520px;border-radius:999px;background:rgba(99,102,241,0.30);filter:blur(140px);pointer-events:none}
+  .vid-next::after{content:"";position:absolute;bottom:-200px;right:-100px;width:520px;height:520px;border-radius:999px;background:rgba(6,182,212,0.25);filter:blur(140px);pointer-events:none}
+  .vid-next-grid{position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,0.04) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.04) 1px,transparent 1px);background-size:60px 60px;mask-image:radial-gradient(ellipse at center,black 30%,transparent 80%);pointer-events:none}
+  .vid-next-row{position:relative;display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}
+  .vid-next-eyebrow{font-size:11px;letter-spacing:.24em;text-transform:uppercase;color:#a5b4fc;font-weight:500;display:inline-flex;align-items:center;gap:12px}
+  .vid-next-eyebrow::before{content:"";width:24px;height:1px;background:#a5b4fc;opacity:.6}
+  .vid-next-stats{display:flex;gap:24px;font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:rgba(255,255,255,0.55);font-weight:500}
+  .vid-next-stats b{color:#fff;font-weight:500}
+  .vid-next-h{position:relative;font-family:"Instrument Serif",serif;font-weight:400;font-size:44px;line-height:1.0;letter-spacing:-0.02em;margin:0 0 32px;max-width:520px}
+  .vid-next-h em{font-style:italic;color:rgba(255,255,255,0.7)}
+  .vid-next-frame{position:relative;border-radius:18px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);box-shadow:0 60px 120px -30px rgba(99,102,241,0.45),0 0 0 1px rgba(99,102,241,0.18) inset;background:#1d1b16}
+  .vid-next-chrome{display:flex;align-items:center;gap:8px;padding:10px 14px;background:rgba(255,255,255,0.03);border-bottom:1px solid rgba(255,255,255,0.06)}
+  .vid-next-chrome .dot{width:9px;height:9px;border-radius:999px;background:rgba(255,255,255,0.16)}
+  .vid-next-url{margin-left:12px;flex:1;background:rgba(255,255,255,0.05);border-radius:999px;padding:5px 14px;font-size:11px;color:rgba(255,255,255,0.55);font-family:ui-monospace,SF Mono,monospace;display:inline-flex;align-items:center;gap:8px}
+  .vid-next-url::before{content:"";width:6px;height:6px;border-radius:999px;background:#16a34a;flex:0 0 auto}
+  .vid-next-canvas{aspect-ratio:16/10;background:linear-gradient(135deg,#312e81 0%,#0f172a 60%,#0c4a6e 100%);position:relative;display:flex;align-items:center;justify-content:center}
+  .vid-next-canvas::after{content:"▶";color:rgba(255,255,255,0.95);font-size:30px;width:80px;height:80px;border-radius:999px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.20);display:flex;align-items:center;justify-content:center;backdrop-filter:blur(10px);padding-left:6px}
+  .vid-next-cap{position:relative;display:flex;justify-content:space-between;align-items:flex-end;margin-top:32px}
+  .vid-next-caplead{font-size:13px;line-height:1.55;color:rgba(255,255,255,0.65);max-width:380px}
+  .vid-next-cta{display:inline-flex;align-items:center;gap:10px;padding:12px 22px;border-radius:999px;background:#fff;color:#0a0a0a;font-size:14px;font-weight:600}
+  .vid-next-cta::after{content:"→"}
+
+  /* ─────── mock 3: get started CTA section ─────── */
+  .gs-now{padding:48px 36px;background:#fff;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center}
+  .gs-now-h{font-size:32px;font-weight:700;color:var(--ink);margin:0}
+  .gs-now-sub{font-size:14px;color:#475569;max-width:380px;margin:0}
+  .gs-now-cta{padding:12px 24px;border-radius:999px;background:var(--indigo);color:#fff;font-size:14px;font-weight:600;margin-top:8px}
+
+  .gs-next{position:relative;padding:0;background:var(--paper);overflow:hidden}
+  .gs-next-inner{position:relative;display:grid;grid-template-columns:1.1fr 1fr;gap:48px;padding:64px 48px}
+  .gs-next-inner::before{content:"";position:absolute;top:-180px;right:-180px;width:540px;height:540px;border-radius:999px;background:rgba(99,102,241,0.10);filter:blur(120px);pointer-events:none}
+  .gs-next-inner::after{content:"";position:absolute;bottom:-180px;left:-180px;width:520px;height:520px;border-radius:999px;background:rgba(6,182,212,0.08);filter:blur(120px);pointer-events:none}
+  .gs-next-eyebrow{font-size:11px;letter-spacing:.24em;text-transform:uppercase;color:var(--indigo);font-weight:500;display:inline-flex;align-items:center;gap:12px}
+  .gs-next-eyebrow::before{content:"";width:24px;height:1px;background:var(--indigo);opacity:.6}
+  .gs-next-h{font-family:"Instrument Serif",serif;font-weight:400;font-size:54px;line-height:0.98;letter-spacing:-0.025em;margin:18px 0 0;color:var(--ink)}
+  .gs-next-h em{font-style:italic;color:var(--ink2)}
+  .gs-next-sub{margin-top:20px;font-size:15px;line-height:1.6;color:var(--ink2);max-width:420px}
+  .gs-next-bullets{margin-top:24px;display:flex;flex-direction:column;gap:10px}
+  .gs-next-bullets div{display:flex;align-items:center;gap:10px;font-size:13.5px;color:var(--ink2)}
+  .gs-next-bullets svg{flex:0 0 auto}
+  .gs-next-cta-row{margin-top:32px;display:flex;align-items:center;gap:14px}
+  .gs-next-primary{padding:13px 26px;border-radius:999px;background:var(--ink);color:#fff;font-size:14px;font-weight:600;display:inline-flex;align-items:center;gap:10px}
+  .gs-next-primary::after{content:"→"}
+  .gs-next-ghost{padding:13px 22px;font-size:14px;color:var(--ink);font-weight:500;border-radius:999px;border:1px solid rgba(15,23,42,0.12);background:#fff}
+
+  .gs-next-card{position:relative;background:#fff;border:1px solid rgba(15,23,42,0.06);border-radius:20px;padding:24px;box-shadow:0 30px 60px -30px rgba(15,23,42,0.20)}
+  .gs-next-card-head{display:flex;justify-content:space-between;align-items:center;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--muted);font-weight:500;margin-bottom:16px}
+  .gs-next-card-h{font-family:"Instrument Serif",serif;font-weight:400;font-style:italic;font-size:24px;margin:0 0 16px;color:var(--ink)}
+  .gs-next-input{height:46px;border:1px solid #e2e8f0;border-radius:12px;padding:0 16px;display:flex;align-items:center;font-size:14px;color:var(--muted);background:#fbfaf7;margin-bottom:10px}
+  .gs-next-input.focus{border:1.5px solid var(--indigo);background:#fff;color:var(--ink)}
+  .gs-next-input.focus::after{content:"";display:inline-block;width:1.5px;height:18px;background:var(--indigo);margin-left:2px;animation:blink 1.1s steps(2) infinite}
+  @keyframes blink{50%{opacity:0}}
+  .gs-next-go{margin-top:14px;height:50px;border-radius:999px;background:linear-gradient(90deg,var(--indigo),var(--cyan));color:#fff;font-size:15px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:10px}
+  .gs-next-go::after{content:"→"}
+  .gs-next-trust{margin-top:16px;display:flex;justify-content:space-between;align-items:center;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);font-weight:500;padding-top:14px;border-top:1px solid var(--line)}
+  .gs-next-trust .live{display:inline-flex;align-items:center;gap:8px;color:#16a34a}
+  .gs-next-trust .live::before{content:"";width:6px;height:6px;border-radius:999px;background:#16a34a}
+
+  /* ─────── design-system at end ─────── */
+  .ds{margin-top:80px;background:#fff;border:1px solid var(--line);border-radius:24px;padding:48px;box-shadow:0 30px 60px -30px rgba(15,23,42,0.10)}
+  .ds-h{font-family:"Instrument Serif",serif;font-style:italic;font-weight:400;font-size:36px;margin:0;color:var(--ink)}
+  .ds-grid{margin-top:32px;display:grid;grid-template-columns:repeat(4,1fr);gap:20px}
+  .ds-card{background:var(--paper);border-radius:14px;padding:18px;border:1px solid var(--line)}
+  .ds-tag{font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:10px}
+  .ds-val{font-family:ui-monospace,SF Mono,monospace;font-size:13px;color:var(--ink)}
+  .ds-swatch{display:flex;gap:6px;margin-top:8px}
+  .ds-sw{width:32px;height:32px;border-radius:8px;border:1px solid rgba(0,0,0,0.06)}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <!-- ── doc header ───────────────────────────── -->
+  <div class="doc-eyebrow">design brief · for swayat.com</div>
+  <h1 class="doc-h1">From workmanlike<br/><em>to professional.</em></h1>
+  <p class="doc-sub">Three sections of swayat.com (header, hero video, Get Started CTA) re-rendered with intentional panels, layered backgrounds, and a serif-led typographic system. Below each "after" mock is a copy-paste prompt you can hand to Claude verbatim.</p>
+  <div class="doc-meta"><span><b>three sections</b> · header / video / cta</span><span><b>one system</b> · cream + indigo + cyan</span><span><b>typography</b> · instrument serif + roboto</span></div>
+
+  <hr class="div"/>
+
+  <!-- ─────────────────────────────────────────── -->
+  <!-- ── 01. HEADER ──────────────────────────── -->
+  <!-- ─────────────────────────────────────────── -->
+  <div class="sec-num">01.</div>
+  <h2 class="sec-h">Header — <em>floating glass pill</em></h2>
+  <p class="sec-lede">The current header is a flat white bar that fights the cream page underneath. Lift it into a floating, glass-blurred pill so it reads as chrome that <em>sits on top of</em> the page rather than slicing it in half.</p>
+
+  <div class="ba">
+    <div class="panel">
+      <div class="panel-head"><span class="panel-tag now">today · flat bar</span><span class="panel-tag" style="opacity:.5">≈</span></div>
+      <div class="panel-body">
+        <div class="nav-now">
+          <div class="nav-now-bar">
+            <div class="nav-logo"><span class="lm">S</span>Swayat AI</div>
+            <div class="nav-now-links"><span>Features ▾</span><span>Pricing</span><span>Blog</span><span>Book a Demo</span><span>Sign In</span></div>
+            <div class="nav-now-cta">Get Started</div>
+          </div>
+        </div>
+      </div>
+      <div class="panel-foot">Full-width white bar with bottom border — generic SaaS chrome. Logo competes with nav weight; CTA color floats alone.</div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><span class="panel-tag next">redesign · floating pill</span><span class="panel-tag" style="opacity:.5">→</span></div>
+      <div class="panel-body">
+        <div class="nav-next-shell">
+          <div class="nav-next">
+            <div class="nav-next-left">
+              <div class="nav-logo" style="font-weight:500;letter-spacing:-0.02em">
+                <span class="lm" style="background:var(--ink);border-radius:7px">
+                  <svg width="14" height="14" viewBox="0 0 100 100" fill="none"><path d="M72 30 C72 18, 50 18, 40 28 C30 38, 42 44, 58 50 C74 56, 80 66, 70 76 C60 86, 40 86, 28 76" stroke="white" stroke-width="11" stroke-linecap="round" fill="none"/></svg>
+                </span>
+                <span>swayat<span style="color:#cbd5e1">.</span></span>
+              </div>
+              <div class="nav-next-links">
+                <a class="has">Features</a>
+                <a>Pricing</a>
+                <a>Blog</a>
+              </div>
+            </div>
+            <div class="nav-next-right">
+              <a class="nav-next-ghost">Book a demo</a>
+              <a class="nav-next-ghost">Sign in</a>
+              <a class="nav-next-cta">Get started</a>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="panel-foot">Glass-blurred pill, floats 24px from page edge. Logo demoted to wordmark; nav split left/right with ghost buttons; CTA in ink-black for contrast against the cream page.</div>
+    </div>
+  </div>
+
+  <div class="instr">
+    <div class="instr-tag">prompt for claude · paste verbatim</div>
+    <h3 class="instr-h">"Replace the flat header with a floating glass pill."</h3>
+    <div class="instr-body"><b>Context:</b> the current header is <i>&lt;header class="fixed top-0 w-full border-b bg-white/80 backdrop-blur-lg"&gt;</i> — a full-width bar.
+
+<b>Target:</b> a floating <i>rounded-full</i> pill that sits 16–24px from the top, max-width ~1200px, centered. Use these tokens:
+
+  background: <i>rgba(255,255,255,0.72)</i> with <i>backdrop-blur(20px) saturate(140%)</i>
+  border: <i>1px solid rgba(15,23,42,0.06)</i>
+  shadow: <i>0 1px 0 rgba(255,255,255,0.6) inset, 0 20px 40px -20px rgba(15,23,42,0.20)</i>
+  padding: <i>8px 8px 8px 22px</i> (extra room on the left for the wordmark)
+  radius: <i>9999px</i>
+
+<b>Logo:</b> swap the bold "Swayat AI" for the lowercase wordmark <i>swayat<span style='color:#cbd5e1'>.</span></i> in <i>font-weight: 500</i>, <i>letter-spacing: -0.02em</i>, with the existing 'S' glyph in a 24×24 ink-black rounded-square (<i>radius: 7px</i>).
+
+<b>Nav split:</b> primary links (Features ▾ · Pricing · Blog) on the left next to the logo; secondary (Book a demo · Sign in) as ghost pills on the right with <i>hover: rgba(15,23,42,0.05)</i>; the "Get started" CTA stays last but switch its background from <i>--primary</i> (indigo) to <i>--ink</i> (#0a0a0a) so it carries weight against the cream page.
+
+<b>Why:</b> the cream hero needs the header to feel like chrome floating <i>on</i> it, not a slab cutting it in half.</div>
+    <div class="instr-foot"><span><b>files</b> · components/Header.tsx</span><span><b>tokens added</b> · ink-black CTA</span><span><b>est. lift</b> · 1 component, ~40 LOC</span></div>
+  </div>
+
+  <hr class="div"/>
+
+  <!-- ─────────────────────────────────────────── -->
+  <!-- ── 02. VIDEO SHOWCASE ──────────────────── -->
+  <!-- ─────────────────────────────────────────── -->
+  <div class="sec-num">02.</div>
+  <h2 class="sec-h">Hero video — <em>frame the artifact.</em></h2>
+  <p class="sec-lede">Right now the video sits naked on the page — a 1420×888 rectangle bleeding into the background, with a lonely "Get Started" button below. The video <em>is</em> the artifact; treat it like one. Dark stage, browser chrome around the canvas, intentional framing.</p>
+
+  <div class="ba">
+    <div class="panel">
+      <div class="panel-head"><span class="panel-tag now">today · naked video</span><span class="panel-tag" style="opacity:.5">≈</span></div>
+      <div class="panel-body">
+        <div class="vid-now">
+          <div class="vid-now-frame">video element · 16:10 · no chrome</div>
+          <div class="vid-now-cta">Get Started</div>
+        </div>
+      </div>
+      <div class="panel-foot">Full-bleed video with three blur halos behind it. The video has no frame, no caption, no context — it just plays. The CTA below floats unmoored.</div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><span class="panel-tag next">redesign · staged showcase</span><span class="panel-tag" style="opacity:.5">→</span></div>
+      <div class="panel-body">
+        <div class="vid-next">
+          <div class="vid-next-grid"></div>
+          <div class="vid-next-row">
+            <div class="vid-next-eyebrow">live demo · 12 seconds</div>
+            <div class="vid-next-stats"><span><b>4,200+</b> sites built</span><span><b>0</b> dashboards</span></div>
+          </div>
+          <h3 class="vid-next-h">One message in.<br/><em>A live website out.</em></h3>
+          <div class="vid-next-frame">
+            <div class="vid-next-chrome">
+              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+              <span class="vid-next-url">emma-babyshower.swayat.com · live</span>
+            </div>
+            <div class="vid-next-canvas"></div>
+          </div>
+          <div class="vid-next-cap">
+            <div class="vid-next-caplead">Watch Swayat parse a single WhatsApp message and ship a real RSVP page to its own subdomain — no app, no editor, no template picker.</div>
+            <a class="vid-next-cta">Get started free</a>
+          </div>
+        </div>
+      </div>
+      <div class="panel-foot">Dark stage with subtle dot grid + indigo/cyan halos. Browser chrome wraps the video. Eyebrow + serif headline + caption + CTA give the artifact context and weight.</div>
+    </div>
+  </div>
+
+  <div class="instr">
+    <div class="instr-tag">prompt for claude · paste verbatim</div>
+    <h3 class="instr-h">"Frame the hero video like a piece of work, not a banner."</h3>
+    <div class="instr-body"><b>Context:</b> the section currently is <i>&lt;section class="flex min-h-screen flex-col items-center"&gt;</i> with a naked <i>&lt;video&gt;</i> and a "Get Started" button below.
+
+<b>Target:</b> rebuild as a <b>dark staged showcase</b>:
+
+  section bg: <i>#0a0a0a</i>
+  padding: <i>96px clamp(24px, 5vw, 64px)</i>
+  + <i>radial-gradient</i> halos: indigo top-left (<i>rgba(99,102,241,0.30)</i>, blur 140px), cyan bottom-right (<i>rgba(6,182,212,0.25)</i>, blur 140px)
+  + faint grid: 60×60 lines at <i>rgba(255,255,255,0.04)</i>, masked with a radial fade
+
+<b>Composition:</b> a <i>max-width: 1180px</i> column inside the dark stage, structured top-to-bottom:
+
+  1. <b>Top row</b> — small eyebrow ("live demo · 12 seconds" in indigo-300, uppercase, .24em tracking) on the left; two stats on the right (<b>4,200+</b> sites built · <b>0</b> dashboards) in white over .55-opacity captions.
+  2. <b>Headline</b> — Instrument Serif, 44–56px, <i>"One message in. A live website out."</i> with the second line italic and 70% opacity.
+  3. <b>The video, framed</b> — wrap it in a browser-chrome card:
+     - outer: <i>rounded-2xl</i>, <i>1px rgba(255,255,255,0.08)</i>, glow shadow <i>0 60px 120px -30px rgba(99,102,241,0.45), 0 0 0 1px rgba(99,102,241,0.18) inset</i>
+     - chrome bar: 3 muted dots + a pill URL (<i>emma-babyshower.swayat.com</i>) with a green <b>live</b> dot
+     - the video keeps its 16:10 aspect, fills the card body
+  4. <b>Caption row</b> — a 380px lede on the left ("Watch Swayat parse a WhatsApp message..."); white pill CTA on the right ("Get started free →").
+
+<b>Remove</b> the existing trio of blur halos — the new stage has its own. <b>Keep</b> the video's <i>autoplay loop muted playsinline</i> attributes.
+
+<b>Why:</b> a naked video on a white page reads like a marketing GIF. Framed in a dark stage with chrome, headline, and stats, it reads like the product itself.</div>
+    <div class="instr-foot"><span><b>files</b> · components/HeroVideo.tsx</span><span><b>new tokens</b> · stage-bg, stage-grid</span><span><b>est. lift</b> · 1 component, ~80 LOC</span></div>
+  </div>
+
+  <hr class="div"/>
+
+  <!-- ─────────────────────────────────────────── -->
+  <!-- ── 03. GET STARTED ─────────────────────── -->
+  <!-- ─────────────────────────────────────────── -->
+  <div class="sec-num">03.</div>
+  <h2 class="sec-h">"Get Started" — <em>stop being a button.</em></h2>
+  <p class="sec-lede">A 1420×1124 section that is <em>just</em> the words "Get Started" and a button is the closest thing the page has to giving up. Make it a real two-column block: editorial left, signup card right.</p>
+
+  <div class="ba">
+    <div class="panel">
+      <div class="panel-head"><span class="panel-tag now">today · empty section</span><span class="panel-tag" style="opacity:.5">≈</span></div>
+      <div class="panel-body">
+        <div class="gs-now">
+          <h3 class="gs-now-h">Get Started</h3>
+          <p class="gs-now-sub">(no other content in this 1420×1124 section)</p>
+          <div class="gs-now-cta">Get Started</div>
+        </div>
+      </div>
+      <div class="panel-foot">A full viewport of empty page. Worse than no section at all — it teaches the reader that nothing important happens here.</div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><span class="panel-tag next">redesign · editorial + form</span><span class="panel-tag" style="opacity:.5">→</span></div>
+      <div class="panel-body">
+        <div class="gs-next">
+          <div class="gs-next-inner">
+            <div>
+              <div class="gs-next-eyebrow">start free · no credit card</div>
+              <h3 class="gs-next-h">Send your first<br/><em>message tonight.</em></h3>
+              <p class="gs-next-sub">Tell Swayat what you need. It builds, hosts, and replies for you — straight from WhatsApp. Most users have something live in under a minute.</p>
+              <div class="gs-next-bullets">
+                <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="#16a34a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Free for the first 14 days</div>
+                <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="#16a34a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>No app, no editor, no setup</div>
+                <div><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="#16a34a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Cancel from a single message</div>
+              </div>
+              <div class="gs-next-cta-row">
+                <a class="gs-next-primary">Get started free</a>
+                <a class="gs-next-ghost">Book a demo</a>
+              </div>
+            </div>
+
+            <div class="gs-next-card">
+              <div class="gs-next-card-head"><span>step one of one</span><span>~30 seconds</span></div>
+              <h4 class="gs-next-card-h">What's your number?</h4>
+              <div class="gs-next-input">+1 (650) 555 ·</div>
+              <div class="gs-next-input focus">Tell Swayat what you need…</div>
+              <div class="gs-next-go">Start chatting on WhatsApp</div>
+              <div class="gs-next-trust">
+                <span class="live">live · 4,200+ businesses</span>
+                <span>SOC2 · in progress</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="panel-foot">Two columns: editorial promise on the left (eyebrow → serif headline → bullets → CTAs); a focused signup card on the right with phone field, intent field, and a single primary action.</div>
+    </div>
+  </div>
+
+  <div class="instr">
+    <div class="instr-tag">prompt for claude · paste verbatim</div>
+    <h3 class="instr-h">"Replace the empty 'Get Started' section with a real two-column conversion block."</h3>
+    <div class="instr-body"><b>Context:</b> the section is currently a <i>min-h-screen</i> flex container holding only the autoplay video and a single "Get Started" button. The 1100px below the video is dead space.
+
+<b>Target:</b> rebuild as a two-column composition on a cream paper background (<i>#fbf8f3</i>), inside the existing section but below the staged video block (or as its own section, your call):
+
+  layout: <i>grid grid-cols-[1.1fr_1fr] gap-12 px-12 py-16 max-w-6xl mx-auto</i>
+  bg: <i>--paper</i> with two soft halos — indigo top-right, cyan bottom-left, both at .08–.10 opacity, blur 120px
+
+<b>Left column (editorial):</b>
+  - eyebrow: "start free · no credit card" in indigo, .24em tracking, with a 24px line glyph in front
+  - headline: <b>Instrument Serif</b>, 54px, two lines: <i>"Send your first / message tonight."</i> with line two italic and ink-2 color
+  - sub: 15px Roboto, max-w 420px, ink-2
+  - 3 bullets with green checkmarks: "Free for the first 14 days", "No app, no editor, no setup", "Cancel from a single message"
+  - CTA row: <b>ink-black pill</b> "Get started free →" + <b>ghost pill</b> "Book a demo"
+
+<b>Right column (signup card):</b>
+  - white card, <i>rounded-2xl</i>, <i>1px rgba(15,23,42,0.06)</i>, shadow <i>0 30px 60px -30px rgba(15,23,42,0.20)</i>, padding 24px
+  - tiny header row: "step one of one" / "~30 seconds" in muted uppercase
+  - card headline: Instrument Serif italic 24px, <i>"What's your number?"</i>
+  - two stacked inputs: country/phone, then intent ("Tell Swayat what you need…") with the focused one bordered indigo + a blinking caret
+  - primary submit: full-width pill, <i>linear-gradient(90deg,--indigo,--cyan)</i>, "Start chatting on WhatsApp →"
+  - trust row at the bottom (separated by a 1px line): green dot + "live · 4,200+ businesses" on the left, "SOC2 · in progress" on the right
+
+<b>Why:</b> a CTA section that's just a button wastes a viewport. Pair the promise with the action — editorial-left, form-right is the highest-converting layout for B2B SaaS landings, and the serif headline matches the new visual system.</div>
+    <div class="instr-foot"><span><b>files</b> · components/GetStarted.tsx</span><span><b>new component</b> · SignupCard</span><span><b>est. lift</b> · 2 components, ~150 LOC</span></div>
+  </div>
+
+  <!-- ─────── system summary ─────── -->
+  <div class="ds">
+    <h3 class="ds-h">The system, in one place.</h3>
+    <p class="sec-lede" style="margin-top:8px">Hand these tokens to Claude alongside the prompts above. They're consistent across all three sections.</p>
+    <div class="ds-grid">
+      <div class="ds-card">
+        <div class="ds-tag">color · surface</div>
+        <div class="ds-val">--cream #f4f1ec<br/>--paper #fbf8f3<br/>--ink #0a0a0a<br/>--ink-2 #3a3833</div>
+        <div class="ds-swatch">
+          <div class="ds-sw" style="background:#f4f1ec"></div>
+          <div class="ds-sw" style="background:#fbf8f3"></div>
+          <div class="ds-sw" style="background:#0a0a0a"></div>
+          <div class="ds-sw" style="background:#3a3833"></div>
+        </div>
+      </div>
+      <div class="ds-card">
+        <div class="ds-tag">color · accent</div>
+        <div class="ds-val">--indigo #6366f1<br/>--indigo-2 #4338ca<br/>--cyan #06b6d4<br/>--green #16a34a</div>
+        <div class="ds-swatch">
+          <div class="ds-sw" style="background:#6366f1"></div>
+          <div class="ds-sw" style="background:#4338ca"></div>
+          <div class="ds-sw" style="background:#06b6d4"></div>
+          <div class="ds-sw" style="background:#16a34a"></div>
+        </div>
+      </div>
+      <div class="ds-card">
+        <div class="ds-tag">type · headline</div>
+        <div class="ds-val" style="font-family:'Instrument Serif',serif;font-size:24px;line-height:1.05">Instrument Serif<br/><em>italic for emphasis</em></div>
+      </div>
+      <div class="ds-card">
+        <div class="ds-tag">type · body + ui</div>
+        <div class="ds-val" style="font-family:Roboto;font-size:14px">Roboto · 400 / 500 / 600<br/>uppercase eyebrows .22em</div>
+      </div>
+      <div class="ds-card">
+        <div class="ds-tag">radius</div>
+        <div class="ds-val">card · 20px<br/>input · 12px<br/>pill · 9999px</div>
+      </div>
+      <div class="ds-card">
+        <div class="ds-tag">shadow</div>
+        <div class="ds-val">soft · 0 30px 60px -30px<br/>&nbsp;&nbsp;rgba(15,23,42,0.12)<br/>glow · indigo @ .45</div>
+      </div>
+      <div class="ds-card">
+        <div class="ds-tag">grain · halos</div>
+        <div class="ds-val">indigo blob 540×540 blur 120px<br/>cyan blob 520×520 blur 120px<br/>opacity .08–.30</div>
+      </div>
+      <div class="ds-card">
+        <div class="ds-tag">cta hierarchy</div>
+        <div class="ds-val">primary · ink pill<br/>secondary · ghost pill<br/>splash · indigo→cyan</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

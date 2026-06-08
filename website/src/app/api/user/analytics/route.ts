@@ -1,11 +1,22 @@
 import { NextResponse } from "next/server";
 import { getUserAnalytics, upsertUserAnalytics, getAllUserAnalytics } from "@/lib/db";
 
+// Service-to-service auth: the bot sends SERVICE_API_SECRET as x-api-key.
+function isAuthorized(request: Request): boolean {
+  const secret = process.env.SERVICE_API_SECRET;
+  if (!secret) return false;
+  return request.headers.get("x-api-key") === secret;
+}
+
 /**
  * GET /api/user/analytics?phone=+14155551234
  * Returns analytics for a specific user, or all users if no phone specified.
+ * Requires SERVICE_API_SECRET (x-api-key).
  */
 export async function GET(request: Request) {
+  if (!isAuthorized(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   const { searchParams } = new URL(request.url);
   const phone = searchParams.get("phone");
 
@@ -31,8 +42,12 @@ export async function GET(request: Request) {
  * POST /api/user/analytics
  * Upsert analytics data for a user. Called by the bot after each task.
  * Body: { phone, ...analytics fields }
+ * Requires SERVICE_API_SECRET (x-api-key).
  */
 export async function POST(request: Request) {
+  if (!isAuthorized(request)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   try {
     const body = await request.json();
     const { phone, ...data } = body;

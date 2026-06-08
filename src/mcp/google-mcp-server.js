@@ -28,7 +28,7 @@ async function apiCall(endpoint, params) {
 
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-bot-auth': process.env.INTERNAL_API_TOKEN || '' },
     body,
   });
 
@@ -78,9 +78,9 @@ server.tool(
 
 server.tool(
   'gmail_inbox',
-  'List or search Gmail inbox',
-  { query: z.string().optional(), maxResults: z.number().optional() },
-  toolHandler('/gmail/inbox', ({ query, maxResults }) => ({ query, maxResults })),
+  'List or search Gmail. Returns { emails, nextPageToken }. For bulk jobs ("all emails"), loop: pass nextPageToken back as pageToken until it is null. maxResults up to 100 per page.',
+  { query: z.string().optional(), maxResults: z.number().optional(), pageToken: z.string().optional() },
+  toolHandler('/gmail/inbox', ({ query, maxResults, pageToken }) => ({ query, maxResults, pageToken })),
 );
 
 server.tool(

@@ -120,6 +120,19 @@ export function CheckIcon(props: IconProps) {
   );
 }
 
+export function WebsiteIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M3 9h18" />
+      <circle cx="6" cy="6.5" r="0.6" fill="currentColor" />
+      <circle cx="8.5" cy="6.5" r="0.6" fill="currentColor" />
+      <circle cx="11" cy="6.5" r="0.6" fill="currentColor" />
+      <path d="M7 13h6M7 16h10" />
+    </Svg>
+  );
+}
+
 export function SendIcon(props: IconProps) {
   return (
     <Svg {...props}>

@@ -36,7 +36,10 @@ async function sendWhatsAppMessage(phone: string, message: string) {
   try {
     await fetch(`${BOT_API_URL}/send`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.SERVICE_API_SECRET || "",
+      },
       body: JSON.stringify({ chatId, message }),
     });
   } catch {

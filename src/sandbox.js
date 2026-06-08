@@ -271,7 +271,9 @@ function spawnInBwrap(chatId, claudeArgs, env, pipePrompt = null) {
     { host: path.resolve(config.resendMcpPath), internal: '/opt/mcp/resend-mcp-server.mjs' },
     { host: path.resolve(config.tradingMcpPath), internal: '/opt/mcp/trading-mcp-server.js' },
     { host: path.resolve(config.freetoolsMcpPath), internal: '/opt/mcp/freetools-mcp-server.js' },
+    { host: path.resolve(config.hostSubdomainMcpPath), internal: '/opt/mcp/host-subdomain-mcp-server.js' },
     { host: path.resolve(config.jobHunterMcpPath), internal: '/opt/mcp/job-hunter-mcp-server.js' },
+    { host: path.resolve(config.scheduleMcpPath), internal: '/opt/mcp/schedule-mcp-server.js' },
   ];
   for (const m of mcpMounts) {
     if (fs.existsSync(m.host)) {

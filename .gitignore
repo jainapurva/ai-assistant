@@ -16,6 +16,32 @@ github-app-private-key.pem
 *.pid
 *.log
 .bot-shared-state.json
+.keys
+.admin-dashboard-password
+shopify-tokens.json
+github-installations.json
+.promo_sheet.json
+.promo_remaining.json
+client-projects.json
+
+# PII / private data (do not publish)
+dhruvil_email_contacts.xlsx
+invoice*.pdf
+invoice*.html
+invoice-*.pdf
+
+# Sub-project with its own git repo + node_modules + session cookies (track separately)
+shopify-app/
+
+# Large media / generated artifacts
+*.mp4
+*.mov
+RSVP_image*.png
+app-icon-indigo-2048.png
+intro-video/
+business-card/
+sites/
+.design-drop/
 
 # Runtime dirs
 logs/

@@ -9,9 +9,24 @@ module.exports = {
   claudeModel: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
   maxChunkSize: parseInt(process.env.MAX_RESPONSE_CHARS || '4000', 10),
   commandTimeoutMs: parseInt(process.env.COMMAND_TIMEOUT_MS || '600000', 10),
+  // Premium ("highest plan", i.e. Pro) users: no query timeout + periodic progress
+  // updates on long-running tasks. Accepts bare or @c.us-suffixed WhatsApp IDs.
+  premiumChats: (process.env.PREMIUM_CHATS || '14243937267@c.us')
+    .split(',').map(s => s.trim()).filter(Boolean),
+  // How often to push a "still working" status to premium users mid-task (default 5 min)
+  premiumStatusIntervalMs: parseInt(process.env.PREMIUM_STATUS_INTERVAL_MS || '300000', 10),
+  // Plan name + upgrade link surfaced to non-premium users when a task times out
+  premiumPlanName: process.env.PREMIUM_PLAN_NAME || 'Pro',
+  premiumUpgradeUrl: process.env.PREMIUM_UPGRADE_URL || 'https://swayat.com/#pricing',
   enableSessions: process.env.ENABLE_SESSIONS !== 'false',
   botName: process.env.BOT_NAME || 'Claude Bot',
   httpPort: parseInt(process.env.HTTP_PORT || '5151', 10),
+  // Shared secret for authenticating internal API calls (per-chat HMAC tokens).
+  // Set in .env; if empty, internal auth fails open (logged at startup).
+  internalApiSecret: process.env.INTERNAL_API_SECRET || '',
+  // Shared secret for service-to-service calls to port-3000 routes (website →
+  // /setup-agent, /send, /send-template, /host-subdomain). Static x-api-key.
+  serviceApiSecret: process.env.SERVICE_API_SECRET || '',
   // Comma-separated WhatsApp IDs of admins (e.g. "16262300167@c.us,14243937267@c.us")
   // Groups are only activated if at least one of these is a group admin
   adminNumbers: (process.env.ADMIN_NUMBERS || '').split(',').map(s => s.trim()).filter(Boolean),
@@ -74,6 +89,10 @@ module.exports = {
   jsearchApiKey: process.env.JSEARCH_API_KEY || '',
   // Real Estate MCP server path
   realestateMcpPath: process.env.REALESTATE_MCP_PATH || path.join(__dirname, '..', 'dist', 'realestate-mcp-server.bundle.js'),
+  // Host-Subdomain MCP server path (deploys GitHub repos at <sub>.swayat.com)
+  hostSubdomainMcpPath: process.env.HOST_SUBDOMAIN_MCP_PATH || path.join(__dirname, '..', 'dist', 'host-subdomain-mcp-server.bundle.js'),
+  // Schedule MCP server path (unified scheduler — reminders + recurring tasks)
+  scheduleMcpPath: process.env.SCHEDULE_MCP_PATH || path.join(__dirname, '..', 'dist', 'schedule-mcp-server.bundle.js'),
   // Real Estate external API keys
   fubApiKey: process.env.FUB_API_KEY || '',
   mlsApiUrl: process.env.MLS_API_URL || '',
@@ -86,4 +105,14 @@ module.exports = {
   freetoolsMcpPath: process.env.FREETOOLS_MCP_PATH || path.join(__dirname, '..', 'dist', 'freetools-mcp-server.bundle.js'),
   // Public base URL for the webhook server (cloudflare tunnel) — used for serving media files
   webhookBaseUrl: process.env.WEBHOOK_BASE_URL || '',
+  // Base URL of the website (analytics ingest + admin health heartbeat)
+  analyticsBaseUrl: process.env.ANALYTICS_BASE_URL || 'https://swayat.com',
+  // Heartbeat — periodic smart follow-ups when users go quiet
+  heartbeatEnabled: process.env.HEARTBEAT_ENABLED !== 'false',
+  heartbeatThresholdHours: parseFloat(process.env.HEARTBEAT_THRESHOLD_HOURS || '10'),
+  heartbeatCooldownHours: parseFloat(process.env.HEARTBEAT_COOLDOWN_HOURS || '24'),
+  heartbeatQuietStartHour: parseInt(process.env.HEARTBEAT_QUIET_START || '23', 10),
+  heartbeatQuietEndHour: parseInt(process.env.HEARTBEAT_QUIET_END || '8', 10),
+  heartbeatDefaultTz: process.env.HEARTBEAT_DEFAULT_TZ || 'America/Los_Angeles',
+  heartbeatAllowedChats: (process.env.HEARTBEAT_ALLOWED_CHATS || '').split(',').map(s => s.trim()).filter(Boolean),
 };
